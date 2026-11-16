@@ -20,12 +20,20 @@ jobs:
 
       - name: Rebuild bdmfs_fatfs.irx with UTF-8 (FF_LFN_UNICODE = 2)
         run: |
-          git clone --depth 1 https://github.com/ps2dev/ps2sdk.git /tmp/ps2sdk
-          git clone --depth 1 -b iop-r0.15 https://github.com/fjtrujy/FatFs.git /tmp/ps2sdk/iop/fs/bdmfs_fatfs/fatfs
-          sed -i 's/#define FF_LFN_UNICODE.*/#define FF_LFN_UNICODE 2/' /tmp/ps2sdk/iop/fs/bdmfs_fatfs/fatfs/source/include/ffconf.h
+          rm -rf /tmp/ps2sdk
+          git clone --depth 1 --recurse-submodules https://github.com/ps2dev/ps2sdk.git /tmp/ps2sdk
+          FFCONF=$(find /tmp/ps2sdk/iop/fs/bdmfs_fatfs -name "ffconf.h" | head -n 1)
+          if [ -z "$FFCONF" ]; then
+            rm -rf /tmp/ps2sdk/iop/fs/bdmfs_fatfs/fatfs
+            git clone --depth 1 https://github.com/fjtrujy/FatFs.git /tmp/ps2sdk/iop/fs/bdmfs_fatfs/fatfs
+            FFCONF=$(find /tmp/ps2sdk/iop/fs/bdmfs_fatfs -name "ffconf.h" | head -n 1)
+          fi
+          sed -i 's/#define[[:space:]]*FF_LFN_UNICODE.*/#define FF_LFN_UNICODE 2/' "$FFCONF"
+          grep "FF_LFN_UNICODE" "$FFCONF"
           make -C /tmp/ps2sdk/iop/fs/bdmfs_fatfs
-          find /tmp/ps2sdk/iop/fs/bdmfs_fatfs -name "bdmfs_fatfs.irx" -exec cp -fv {} $PS2SDK/iop/irx/bdmfs_fatfs.irx \;
-          find . -name "bdmfs_fatfs.irx" -exec cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/obj/bdmfs_fatfs.irx {} \; || true
+          IRX_FILE=$(find /tmp/ps2sdk/iop/fs/bdmfs_fatfs -name "bdmfs_fatfs.irx" | head -n 1)
+          cp -fv "$IRX_FILE" "$PS2SDK/iop/irx/bdmfs_fatfs.irx"
+          for f in $(find . -name "bdmfs_fatfs.irx"); do cp -fv "$IRX_FILE" "$f"; done
 
       - name: Generate Full CJK Font (src/font_chs.c)
         run: |
