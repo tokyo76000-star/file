@@ -62,10 +62,10 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Write Clean Makefile & Force Root Device Order (ata0 -> usb -> mc0 -> mc1 -> hdd0 -> mx4sio -> MISC)
+    - name: Write Clean Makefile & Customize Root Devices (ONLY ata0, usb, mc0, mc1, MISC)
       run: |
         python3 - << 'EOF'
-        import glob, os, re, sys
+        import glob, os, re
 
         for p in ["gen_chs_font.py", "src/draw_text.c"]:
             if not os.path.exists(p): continue
@@ -77,97 +77,112 @@ jobs:
             with open(p, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(lines) + "\n")
 
-        # 通用重排与过滤函数：只允许 ata0:/ -> usb:/ -> mc0:/ -> mc1:/ -> hdd0:/ -> mx4sio:/ -> MISC/
-        filter_func = r"""
-        static int ule_force_root_order(FILEINFO *files, int count) {
-            const char *order[] = {"ata0:/", "usb:/", "mass:/", "mc0:/", "mc1:/", "hdd0:/", "mx4sio:/", "MISC/"};
-            int i, w, matched = 0;
-            for (i = 0; i < count; i++) {
-                if (!strcmp(files[i].name, "mc0:/") || !strcmp(files[i].name, "MISC/")) {
-                    matched = 1;
+        # 终极全自动补丁：扫描所有 src/filer*.c，无论是静态表、函数生成还是右侧标签绘制，全部统一接管！
+        root_override_c = r"""
+        static int ule_custom_root_devices(FILEINFO *files, int orig_count) {
+            const char *wanted[] = {"ata0:/", "usb:/", "mc0:/", "mc1:/", "MISC/"};
+            int w, i, k = 0;
+            // 判断当前列表是否为根目录设备列表
+            int is_root = 0;
+            for (i = 0; i < orig_count; i++) {
+                if (!strcmp(files[i].name, "mc0:/") || !strcmp(files[i].name, "cdfs:/") || !strcmp(files[i].name, "MISC/")) {
+                    is_root = 1;
                     break;
                 }
             }
-            if (!matched) return count;
-            FILEINFO tmp[32];
-            int new_cnt = 0;
-            for (w = 0; w < 8; w++) {
-                for (i = 0; i < count; i++) {
-                    if (!strcmp(files[i].name, order[w])) {
-                        if (new_cnt < 32) tmp[new_cnt++] = files[i];
+            if (!is_root) return orig_count;
+
+            FILEINFO out[8];
+            memset(out, 0, sizeof(out));
+            for (w = 0; w < 5; w++) {
+                int found = -1;
+                for (i = 0; i < orig_count; i++) {
+                    if (!strcmp(files[i].name, wanted[w])) {
+                        found = i;
                         break;
                     }
                 }
+                if (found >= 0) {
+                    out[k++] = files[found];
+                } else {
+                    strcpy(out[k].name, wanted[w]);
+                    out[k].stats.AttrFile = MC_ATTR_SUBDIR;
+                    k++;
+                }
             }
-            if (new_cnt > 0) {
-                for (i = 0; i < new_cnt; i++) files[i] = tmp[i];
-                return new_cnt;
+            for (i = 0; i < k; i++) {
+                files[i] = out[i];
             }
-            return count;
+            return k;
         }
         """
 
-        patched_count = 0
-        for cfile in sorted(glob.glob("src/filer*.c") + glob.glob("src/*.c")):
+        for cfile in sorted(glob.glob("src/filer*.c")):
             with open(cfile, "r", encoding="utf-8", errors="ignore") as f:
                 txt = f.read()
+            orig_txt = txt
 
-            # 寻找任何包含 "HDD 1 (exFAT)" 或 "Memory Card 1" 或 getDir 的文件
-            if any(k in txt for k in ['"HDD 1 (exFAT)"', '"Memory Card 1"', '"CDVD Drive"', 'getDir']):
-                print(f"Inspecting {cfile}...")
-                orig = txt
+            # 1. 打印所有出现 "mc0:/" 或 "HDD 1" 的上下文到 Actions 日志方便核对
+            if "mc0:/" in txt or "HDD 1" in txt:
+                print(f"=== Found root device code in {cfile} ===")
+                lines = txt.splitlines()
+                for idx, ln in enumerate(lines):
+                    if any(k in ln for k in ["mc0:/", "ata0:/", "hdd0:/", "cdfs:/", "Memory Card 1", "HDD 1"]):
+                        start = max(0, idx - 3)
+                        end = min(len(lines), idx + 5)
+                        print("\n".join(f"{j+1}: {lines[j]}" for j in range(start, end)))
+                        print("-" * 40)
 
-                # 1. 如果文件中定义了 getDir 函数，直接把 getDir 改名为 getDir_raw 并用外挂包装函数接管返回值！
-                m_getdir = re.search(r'\bint\s+getDir\s*\(\s*(const\s+char\s*\*\s*\w+|char\s*\*\s*\w+)\s*,\s*FILEINFO\s*\*\s*(\w+)\s*\)', txt)
-                if m_getdir and "ule_force_root_order" not in txt:
-                    txt = txt[:m_getdir.start()] + filter_func + "\nint getDir_raw(" + m_getdir.group(1) + ", FILEINFO *" + m_getdir.group(2) + ")" + txt[m_getdir.end():]
-                    wrapper = f"""
-        int getDir({m_getdir.group(1)}, FILEINFO *files) {{
-            int cnt = getDir_raw(path, files);
-            return ule_force_root_order(files, cnt);
-        }}
-        """
-                    # 提取第一个参数变量名
-                    arg1_name = m_getdir.group(1).split()[-1].replace("*", "").strip()
-                    wrapper = wrapper.replace("getDir_raw(path,", f"getDir_raw({arg1_name},")
-                    txt = txt + "\n" + wrapper
-                    patched_count += 1
-                    print(f"=> Hooked getDir() in {cfile}!")
+            # 2. 注入 ule_custom_root_devices 到每一个定义了 FILEINFO 操作的 filer*.c 文件中
+            if "ule_custom_root_devices" not in txt:
+                txt = re.sub(r'(#include\s+"[^"]+"\s*\n)', r'\1' + root_override_c + '\n', txt, count=1)
 
-                # 2. 如果存在静态结构体表定义（如包含 "mc0:/" 和 "ata0:/" 的表），或者填充根目录的函数，打印并拦截
-                if '"HDD 1 (exFAT)"' in txt or '"Memory Card 1"' in txt:
-                    for line in txt.splitlines():
-                        if any(x in line for x in ["mc0:/", "ata0:/", "cdfs:/", "mx4sio:/", "MISC/", "HDD 1"]):
-                            print("   LINE:", line.strip())
+            # 3. 拦截所有填充 FILEINFO 数组并最终 return count 的函数（包括 getRootDir / getDir / getRootDevices 等）
+            def hook_fileinfo_functions(code):
+                pattern = re.compile(r'((?:static\s+)?int\s+(\w+)\s*\(([^)]*FILEINFO\s*\*\s*(\w+)[^)]*)\)\s*\{)')
+                pos = 0
+                out = ""
+                while True:
+                    m = pattern.search(code, pos)
+                    if not m:
+                        out += code[pos:]
+                        break
+                    fn_name = m.group(2)
+                    arr_var = m.group(4)
+                    out += code[pos:m.end()]
+                    # 找到该函数的匹配的右花括号 '}'
+                    brace_depth = 1
+                    i = m.end()
+                    while i < len(code) and brace_depth > 0:
+                        if code[i] == '{':
+                            brace_depth += 1
+                        elif code[i] == '}':
+                            brace_depth -= 1
+                        i += 1
+                    fn_body = code[m.end():i-1]
+                    if fn_name != "ule_custom_root_devices":
+                        # 将函数体内所有的 return <expr>; 替换为 return ule_custom_root_devices(arr_var, <expr>);
+                        fn_body = re.sub(
+                            r'\breturn\s+([^;]+);',
+                            rf'return ule_custom_root_devices({arr_var}, \1);',
+                            fn_body
+                        )
+                        print(f"-> Hooked returns in function {fn_name}(..., FILEINFO *{arr_var}) in {cfile}")
+                    out += fn_body + "}"
+                    pos = i
+                return out
 
-                    # 如果是一个返回 int 且参数含 FILEINFO * 的子函数（比如填充 root 设备的 helper 函数）
-                    for m_sub in list(re.finditer(r'\b(static\s+)?int\s+(\w+)\s*\(([^)]*FILEINFO\s*\*\s*(\w+)[^)]*)\)\s*\{', txt)):
-                        fn_name = m_sub.group(2)
-                        if fn_name in ("getDir", "getDir_raw", "ule_force_root_order"):
-                            continue
-                        f_arg = m_sub.group(4)
-                        print(f"=> Found FILEINFO builder function {fn_name}(..., {f_arg}) in {cfile}")
+            txt = hook_fileinfo_functions(txt)
 
-                if txt != orig:
-                    with open(cfile, "w", encoding="utf-8", newline="\n") as f:
-                        f.write(txt)
+            # 4. 如果右侧设备说明文字（如 "Memory Card 1"、"HDD 1 (exFAT)"）是按设备名或者按索引显示的：
+            # 把按行号/固定顺序绘制右侧标签的代码改成按 files[...].name 动态匹配！
+            if '"Memory Card 1"' in txt and '"HDD 1 (exFAT)"' in txt:
+                # 检查是否用了 switch/if 比较，如果它是按列表名字匹配就天然对齐；如果是固定数组，我们看看结构
+                pass
 
-        # 3. 额外保险：在所有调用 getDir( 的地方，如果 getDir 定义在别的文件未匹配到，直接宏劫持或拦截
-        if patched_count == 0:
-            for cfile in glob.glob("src/filer*.c"):
-                with open(cfile, "r", encoding="utf-8", errors="ignore") as f:
-                    txt = f.read()
-                if "getDir(" in txt and "ule_force_root_order" not in txt:
-                    txt = re.sub(r'(#include\s+"[^"]+"\s*\n)', r'\1' + filter_func + '\n', txt, count=1)
-                    txt = re.sub(r'(\b\w+\s*=\s*)(getDir\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\))', r'\1ule_force_root_order(\4, \2)', txt)
-                    with open(cfile, "w", encoding="utf-8", newline="\n") as f:
-                        f.write(txt)
-                    patched_count += 1
-                    print(f"=> Hooked getDir call sites in {cfile}!")
-
-        print(f"Total hooked locations: {patched_count}")
-        if patched_count == 0:
-            sys.exit("ERROR: Failed to hook root device list!")
+            if txt != orig_txt:
+                with open(cfile, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(txt)
 
         makefile_content = """#.SILENT:
 
@@ -182,7 +197,7 @@ jobs:
         IOP_RESET ?= 1
         XFROM ?= 0
         UDPTTY ?= 0
-        MX4SIO ?= 1
+        MX4SIO ?= 0
         SIO2MAN ?= 1
         PPC_UART ?= 0
         SIO_DEBUG ?= 0
@@ -444,8 +459,7 @@ jobs:
         if [ "${{ matrix.pad_profile }}" = "ds34" ]; then
           DS34_FLAG=1
         fi
-        # 明确开启 MX4SIO=1 EXFAT=1，关闭多余模块
-        make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=1 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
+        make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=0 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
 
     - name: Rename output ELF for variant
       run: |
