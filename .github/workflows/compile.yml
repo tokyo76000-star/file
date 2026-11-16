@@ -63,10 +63,10 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Sanitize Files, Patch Root Order & Restore Clean Makefile
+    - name: Sanitize Files, Patch UI Fixes, Root Order & Clean Makefile
       run: |
         python3 - << 'EOF'
-        import os, subprocess
+        import glob, os, subprocess
 
         for p in ["gen_chs_font.py", "src/draw_text.c", "src/filer_browser.c", "Lang/ENG.LNG"]:
             if not os.path.exists(p):
@@ -79,6 +79,27 @@ jobs:
             with open(p, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(lines) + "\n")
 
+        # 1. 把默认内置语言显示名 "English" 改成 "中文"
+        if os.path.exists("src/lang.c"):
+            with open("src/lang.c", "r", encoding="utf-8") as f:
+                lc = f.read()
+            lc = lc.replace('"English"', '"中文"')
+            with open("src/lang.c", "w", encoding="utf-8", newline="\n") as f:
+                f.write(lc)
+
+        # 2. 修复设置菜单里的 "换行" -> "返回"、"增加/减少" -> "确定/取消"，以及补全 "Advanced Settings..." -> "高级设置..."
+        for cfg_file in glob.glob("src/config*.c"):
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                ct = f.read()
+            ct = ct.replace("LNG(RETURN)", "LNG(Return)")
+            ct = ct.replace('"Advanced Settings..."', '"高级设置..."')
+            ct = ct.replace('"Advanced Settings"', '"高级设置"')
+            if cfg_file.endswith("config_startup.c"):
+                ct = ct.replace("LNG(Add)", "LNG(OK)").replace("LNG(Subtract)", "LNG(Cancel)")
+            with open(cfg_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write(ct)
+
+        # 3. 汉化主界面右侧设备描述 + 根目录只保留 ata0 -> usb -> mc0 -> mc1 -> MISC
         with open("src/filer_browser.c", "r", encoding="utf-8") as f:
             fb = f.read()
 
