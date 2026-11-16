@@ -1,125 +1,196 @@
-name: Automated-Build
-
-on:
-  workflow_dispatch:
-    inputs:
-      make_args:
-        description: pass extra make argumments to control features not explicitly handled by CI
-  push:
-  repository_dispatch:
-    types: [run_build]
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
-permissions:
-  contents: write
-
-jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant_name: "R3Z"
-            psx_profile: "psx"
-            pad_profile: "no-ds34"
-            storage_profile: "all"
-          - variant_name: "R3Z-DS34"
-            psx_profile: "psx"
-            pad_profile: "ds34"
-            storage_profile: "all"
-    runs-on: ubuntu-latest
-    container: ghcr.io/ps2homebrew/ps2homebrew:main
-    steps:
-
-    - name: Install dependencies
-      run: |
-        if command -v apk >/dev/null 2>&1; then
-          apk add --no-cache make git zip gcc musl-dev python3 py3-pillow font-noto-cjk fontconfig gmp mpfr4 mpc1
-        elif command -v apt-get >/dev/null 2>&1; then
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y make git zip gcc libc6-dev python3 python3-pil fonts-wqy-zenhei fontconfig libgmp10 libmpfr6 libmpc3
-        else
-          exit 1
-        fi
-
-    - uses: actions/checkout@v4
-    - run: |
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-    - name: Rebuild bdmfs_fatfs.irx with UTF-8 (FF_LFN_UNICODE = 2)
-      run: |
-        rm -rf /tmp/ps2sdk
-        git clone --depth 1 https://github.com/ps2dev/ps2sdk.git /tmp/ps2sdk
-        mkdir -p /tmp/ps2sdk/common/external_deps
-        git clone --depth 1 -b iop-r0.15 https://github.com/fjtrujy/FatFs.git /tmp/ps2sdk/common/external_deps/fatfs
-        sed -i 's/#define[[:space:]]*FF_LFN_UNICODE.*/#define FF_LFN_UNICODE 2/' /tmp/ps2sdk/common/external_deps/fatfs/source/include/ffconf.h
-        make -C /tmp/ps2sdk/iop/fs/bdmfs_fatfs PS2SDKSRC=/tmp/ps2sdk
-        for dst in $(find /usr /local $PS2SDK $PS2DEV . -name "bdmfs_fatfs.irx" 2>/dev/null); do
-          cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx "$dst" || true
-        done
-        mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
-        cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
-
-    - name: Write Clean Makefile & Purge Unwanted Root Devices
-      run: |
-        python3 - << 'EOF'
-        import glob, os
-
-        for p in ["gen_chs_font.py", "src/draw_text.c"]:
-            if not os.path.exists(p): continue
-            with open(p, "rb") as f:
-                raw = f.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\xc2\xa0", b" ")
-            lines = raw.decode("utf-8", errors="ignore").splitlines()
-            if lines and lines[0].strip().upper() in ("PYTHON", "C", "CPP", "MAKEFILE", "YAML"):
-                lines = lines[1:]
-            with open(p, "w", encoding="utf-8", newline="\n") as f:
-                f.write("\n".join(lines) + "\n")
-
-        # 在全局 filer 相关源码中，直接把多余设备的注册字符串干掉或过滤
-        for cfile in glob.glob("src/filer*.c"):
-            with open(cfile, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            
-            orig = content
-            # 将常见的多余设备名称替换为空格或直接屏蔽
-            for dev in ['"cdfs:/"', '"mx4sio:/"', '"hdd0:/"', '"mmce0:/"', '"udpfs:/"']:
-                content = content.replace(dev, '""')
-            
-            if content != orig:
-                with open(cfile, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(content)
-                print(f"Purged unwanted devices from {cfile}")
-
-        EOF
-        chmod +x scripts/ci/resolve_make_args.sh
-
-    - name: Generate Full CJK Font (src/font_chs.c)
-      run: |
-        python3 gen_chs_font.py
-
-    - name: Compile wLaunchELF
-      run: |
-        DS34_FLAG=0
-        if [ "${{ matrix.pad_profile }}" = "ds34" ]; then
-          DS34_FLAG=1
-        fi
-        make clean || true
-        make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=0 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
-
-    - name: Rename output ELF for variant
-      run: |
-        set -- BOOT*.ELF
-        if [ "$1" = 'BOOT*.ELF' ]; then
-          echo "No BOOT*.ELF produced by build." >&2
-          exit 1
-        fi
-        cp "$1" "WLE-${{ matrix.variant_name }}.ELF"
-
-    - name: Upload variants artifact ELF
-      uses: actions/upload-artifact@v4
-      with:
-        name: "WLE-${{ matrix.variant_name }}"
-        path: |
-          WLE-${{ matrix.variant_name }}.ELF
+lang(0, Net_Config, "网络配置")
+lang(1, Init_Delay, "初始化延迟")
+lang(2, TIMEOUT, "倒计时")
+lang(3, Halted, "已暂停")
+lang(4, LEFT, "左")
+lang(5, RIGHT, "右")
+lang(6, PUSH_ANY_BUTTON_or_DPAD, "请按任意键或方向键")
+lang(7, Loading_HDL_Info_Module, "正在加载 HDL 信息模块...")
+lang(8, Loading_HDD_Modules, "正在加载硬盘模块...")
+lang(9, Loading_NetFS_and_FTP_Server_Modules, "正在加载 NetFS 与 FTP 服务模块...")
+lang(10, Valid, "有效")
+lang(11, Bogus, "无效")
+lang(12, CNF_Path, "配置文件路径")
+lang(13, is_Not_Found, "未找到")
+lang(14, MISC, "MISC")
+lang(15, PS2Disc, "运行光盘")
+lang(16, FileBrowser, "文件管理器")
+lang(17, PS2Browser, "PS2原生界面")
+lang(18, PS2Net, "网络服务")
+lang(19, PS2PowerOff, "关闭主机电源")
+lang(20, HddManager, "硬盘管理")
+lang(21, TextEditor, "文本编辑器")
+lang(22, JpgViewer, "旧版保留(未使用)")
+lang(23, Configure, "系统设置")
+lang(24, Load_CNFprev, "旧版保留(未使用)")
+lang(25, Load_CNFnext, "旧版保留(未使用)")
+lang(26, Set_CNF_Path, "旧版保留(未使用)")
+lang(27, Load_CNF, "旧版保留(未使用)")
+lang(28, ShowFont, "字体预览")
+lang(29, Reading_SYSTEMCNF, "正在读取 SYSTEM.CNF...")
+lang(30, Failed, "失败")
+lang(31, Powering_Off_Console, "正在关闭主机电源...")
+lang(32, No_Disc, "无光盘")
+lang(33, Detecting_Disc, "正在检测光盘")
+lang(34, Stop_Disc, "停止光盘")
+lang(35, auto, "自动")
+lang(36, Circle, "○键")
+lang(37, Cross, "×键")
+lang(38, Square, "□键")
+lang(39, Triangle, "△键")
+lang(40, Failed_To_Save, "保存失败")
+lang(41, Saved_Failed, "保存失败")
+lang(42, Saved_Config, "配置已保存")
+lang(43, Saved, "已保存")
+lang(44, Failed_writing, "写入失败")
+lang(45, Failed_To_Load, "加载失败")
+lang(46, Loaded_Config, "配置已加载")
+lang(47, SKIN_SETTINGS, "皮肤设置")
+lang(48, Skin_Path, "皮肤路径")
+lang(49, Apply_New_Skin, "应用新皮肤")
+lang(50, Brightness, "亮度")
+lang(51, Edit, "编辑")
+lang(52, Clear, "清除")
+lang(53, Add, "增加")
+lang(54, Subtract, "减少")
+lang(55, OK, "确定")
+lang(56, CANCEL, "取消")
+lang(57, Cancel, "取消")
+lang(58, Browse, "浏览")
+lang(59, Change, "更改")
+lang(60, Return, "返回")
+lang(61, PasteRename, "粘贴并重命名")
+lang(62, Back, "返回")
+lang(63, Use, "使用")
+lang(64, Set, "设置")
+lang(65, Page_leftright, "左/右翻页")
+lang(66, Edit_Title, "编辑标题")
+lang(67, Left, "左")
+lang(68, Right, "右")
+lang(69, Up, "上级")
+lang(70, Enter, "进入")
+lang(71, Choose, "选择")
+lang(72, RevMark, "反选")
+lang(73, TitleOFF, "隐藏标题")
+lang(74, TitleON, "显示标题")
+lang(75, Menu, "菜单")
+lang(76, PathPad, "书签")
+lang(77, Exit, "退出")
+lang(78, View, "查看")
+lang(79, Thumb, "缩略图")
+lang(80, List, "列表")
+lang(81, SlideShow, "幻灯片")
+lang(82, Sel, "选择")
+lang(83, BackSpace, "退格")
+lang(84, Mark, "标记")
+lang(85, CrLf, "Cr/Lf")
+lang(86, Cr, "Cr")
+lang(87, Lf, "Lf")
+lang(88, Ins, "插入")
+lang(89, On, "开")
+lang(90, Off, "关")
+lang(91, Open_KeyBoard, "打开键盘")
+lang(92, Close_KB, "关闭键盘")
+lang(93, free, "可用")
+lang(94, Color, "颜色")
+lang(95, Backgr, "背景")
+lang(96, Frames, "边框")
+lang(97, Select, "光标")
+lang(98, Normal, "文字")
+lang(99, Graph, "图标")
+lang(100, TV_mode, "显示制式")
+lang(101, Screen_X_offset, "画面水平偏移 (X)")
+lang(102, Screen_Y_offset, "画面垂直偏移 (Y)")
+lang(103, Interlace, "隔行扫描")
+lang(104, ON, "开启")
+lang(105, OFF, "关闭")
+lang(106, Skin_Settings, "皮肤设置")
+lang(107, Menu_Title, "菜单标题")
+lang(108, NULL, "空")
+lang(109, NONE, "无")
+lang(110, DEFAULT, "默认")
+lang(111, Menu_Frame, "显示菜单边框")
+lang(112, Popups_Opaque, "不透明弹窗背景")
+lang(113, Use_Default_Screen_Settings, "恢复默认屏幕设置")
+lang(114, STARTUP_SETTINGS, "启动项设置")
+lang(115, Reset_IOP, "重置 IOP")
+lang(116, Number_of_CNFs, "旧版保留(未使用)")
+lang(117, Pad_mapping, "手柄按键映射")
+lang(118, USBD_IRX, "USBD 驱动路径")
+lang(119, Initial_Delay, "初始延迟")
+lang(120, Default_Timeout, "默认等待时间")
+lang(121, USB_Keyboard_Used, "启用 USB 键盘")
+lang(122, USB_Keyboard_IRX, "USB 键盘驱动")
+lang(123, USB_Keyboard_Map, "USB 键盘映射表")
+lang(124, CNF_Path_override, "自定义配置路径")
+lang(125, USB_Mass_IRX, "USB 存储驱动")
+lang(126, Language_File, "外部语言文件")
+lang(127, NETWORK_SETTINGS, "网络设置")
+lang(128, IP_Address, "IP 地址")
+lang(129, Netmask, "子网掩码")
+lang(130, Gateway, "默认网关")
+lang(131, Save_to, "保存至")
+lang(132, Right_DPad_to_Edit, "按方向键右进行编辑")
+lang(133, Button_Settings, "按键快捷键设置")
+lang(134, Show_launch_titles, "显示启动项别名")
+lang(135, Disc_control, "光驱停转控制")
+lang(136, Hide_full_ELF_paths, "隐藏完整 ELF 路径")
+lang(137, Screen_Settings, "屏幕与外观设置")
+lang(138, Startup_Settings, "启动与驱动设置")
+lang(139, Network_Settings, "网络参数设置")
+lang(140, Copy, "复制")
+lang(141, Cut, "剪切")
+lang(142, Paste, "粘贴")
+lang(143, Delete, "删除")
+lang(144, New_Dir, "新建文件夹")
+lang(145, Get_Size, "计算大小")
+lang(146, unused_146, "")
+lang(147, unused_147, "")
+lang(148, Name_conflict_for_this_folder, "该文件夹存在名称冲突")
+lang(149, With_gamesave_title, "存档名称")
+lang(150, Undefined_Not_a_gamesave, "未定义 (非游戏存档)")
+lang(151, Do_you_wish_to_overwrite_it, "是否要覆盖它")
+lang(152, Pasting_file, "正在粘贴文件")
+lang(153, Remain_Size, "剩余大小")
+lang(154, bytes, "字节")
+lang(155, Kbytes, "KB")
+lang(156, Current_Speed, "当前速度")
+lang(157, Unknown, "未知")
+lang(158, Remain_Time, "剩余时间")
+lang(159, Written_Total, "已写入总量")
+lang(160, Average_Speed, "平均速度")
+lang(161, Continue_transfer, "是否继续传输 ?")
+lang(162, This_file_isnt_an_ELF, "该文件不是有效的 ELF 程序")
+lang(163, Copied_to_the_Clipboard, "已复制到剪贴板")
+lang(164, Mark_Files_Delete, "确定删除选中的文件吗 ?")
+lang(165, deleting, "正在删除")
+lang(166, Delete_Failed, "删除失败")
+lang(167, Rename_Failed, "重命名失败")
+lang(168, directory_already_exists, "文件夹已存在")
+lang(169, NewDir_Failed, "新建文件夹失败")
+lang(170, Created_folder, "已创建文件夹")
+lang(171, Path, "路径")
+lang(172, Checking_Size, "正在计算大小...")
+lang(173, size_result, "大小结果")
+lang(174, Size_test_Failed, "计算大小失败")
+lang(175, mctype, "记忆卡类型")
+lang(176, Pasting, "正在粘贴...")
+lang(177, Paste_Failed, "粘贴失败")
+lang(178, pasting, "正在粘贴")
+lang(179, Reading_HDD_Information, "正在读取硬盘信息...")
+lang(180, Found, "已找到")
+lang(181, MB, "MB")
+lang(182, GB, "GB")
+lang(183, HDD_Information_Read, "硬盘信息读取完毕")
+lang(184, Create, "新建")
+lang(185, Remove, "删除")
+lang(186, Rename, "重命名")
+lang(187, Expand, "扩容")
+lang(188, Format, "格式化")
+lang(189, Creating_New_Partition, "正在创建新分区...")
+lang(190, New_Partition_Created, "新分区创建成功")
+lang(191, Failed_Creating_New_Partition, "创建新分区失败")
+lang(192, Removing_Current_Partition, "正在删除当前分区...")
+lang(193, Partition_Removed, "分区已删除")
+lang(194, Failed_Removing_Current_Partition, "删除当前分区失败")
+lang(195,
