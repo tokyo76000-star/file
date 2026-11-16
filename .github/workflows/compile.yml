@@ -79,11 +79,17 @@ jobs:
             with open(p, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(lines) + "\n")
 
-        # 1. 将 "返回主机界面" 精准修改为 "返回主界面"
+        # 1. 修改 Lang/ENG.LNG：
+        #    - "返回主机界面" -> "返回主界面"
+        #    - Add ("增加") -> "向前"，Subtract ("减少") -> "向后"
+        #    - Advanced_Settings -> "高级设置"
         if os.path.exists("Lang/ENG.LNG"):
             with open("Lang/ENG.LNG", "r", encoding="utf-8") as f:
                 lng_txt = f.read()
             lng_txt = lng_txt.replace('"返回主机界面"', '"返回主界面"')
+            lng_txt = re.sub(r'lang\(\s*53\s*,\s*Add\s*,\s*"[^"]*"\s*\)', 'lang(53, Add, "向前")', lng_txt)
+            lng_txt = re.sub(r'lang\(\s*54\s*,\s*Subtract\s*,\s*"[^"]*"\s*\)', 'lang(54, Subtract, "向后")', lng_txt)
+            lng_txt = re.sub(r'lang\(\s*341\s*,\s*Advanced_Settings\s*,\s*"[^"]*"\s*\)', 'lang(341, Advanced_Settings, "高级设置")', lng_txt)
             with open("Lang/ENG.LNG", "w", encoding="utf-8", newline="\n") as f:
                 f.write(lng_txt)
 
@@ -95,22 +101,29 @@ jobs:
             with open("src/lang.c", "w", encoding="utf-8", newline="\n") as f:
                 f.write(lc)
 
-        # 3. 保留原版 "O:增加 X:减少"，修复 "换行" -> "返回"
+        # 3. 彻底干掉 config*.c 里的 "Advanced Settings..." 和 "换行"
         for cfg_file in glob.glob("src/config*.c"):
-            with open(cfg_file, "r", encoding="utf-8") as f:
+            with open(cfg_file, "r", encoding="utf-8", errors="ignore") as f:
                 ct = f.read()
+            # 打印所有包含 Advanced 的行到 Actions 日志，让它无处遁形
+            for idx, line in enumerate(ct.splitlines()):
+                if "Advanced" in line or "advanced" in line:
+                    print(f"[{cfg_file}:{idx+1}] {line.strip()}")
             ct = ct.replace("LNG(RETURN)", "LNG(Return)")
+            # 如果 config.c 用了辅助函数格式化 Advanced_Settings 或硬编码了英文，直接强制替换为 "高级设置"
+            ct = re.sub(r'"Advanced\s+Settings(\.\.\.)?"', lambda m: '"高级设置..."' if m.group(1) else '"高级设置"', ct, flags=re.IGNORECASE)
+            ct = ct.replace('LNG(Advanced_Settings)', '"高级设置"')
+            ct = ct.replace('LNG_DEF(Advanced_Settings)', '"高级设置"')
             with open(cfg_file, "w", encoding="utf-8", newline="\n") as f:
                 f.write(ct)
 
-        # 4. 全源码不区分大小写地毯式替换 "Advanced Settings..." -> "高级设置..."
+        # 4. 全局扫描所有 C/H 文件里残留的 Advanced Settings
         for code_file in glob.glob("src/*.c") + glob.glob("include/*.h"):
             with open(code_file, "r", encoding="utf-8", errors="ignore") as f:
                 ctxt = f.read()
-            new_ctxt, n1 = re.subn(r'"Advanced\s+Settings\.\.\."', '"高级设置..."', ctxt, flags=re.IGNORECASE)
-            new_ctxt, n2 = re.subn(r'"Advanced\s+Settings"', '"高级设置"', new_ctxt, flags=re.IGNORECASE)
-            if n1 or n2:
-                print(f"Patched Advanced Settings ({n1}+{n2}) in {code_file}")
+            new_ctxt = re.sub(r'"Advanced\s+Settings\.\.\."', '"高级设置..."', ctxt, flags=re.IGNORECASE)
+            new_ctxt = re.sub(r'"Advanced\s+Settings"', '"高级设置"', new_ctxt, flags=re.IGNORECASE)
+            if new_ctxt != ctxt:
                 with open(code_file, "w", encoding="utf-8", newline="\n") as f:
                     f.write(new_ctxt)
 
