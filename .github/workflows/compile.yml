@@ -62,10 +62,10 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Write Clean Makefile & Hook Root Devices (Strictly ata0, usb, mc0, mc1, MISC)
+    - name: Write Clean Makefile & Purge Unwanted Root Devices
       run: |
         python3 - << 'EOF'
-        import glob, os, re, sys
+        import glob, os
 
         for p in ["gen_chs_font.py", "src/draw_text.c"]:
             if not os.path.exists(p): continue
@@ -77,65 +77,21 @@ jobs:
             with open(p, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(lines) + "\n")
 
-        # 终极拦截代码：强行洗牌内存里的设备数组，只保留你指定的这几个！
-        hook_template = r"""
-            // --- AUTO SORT HOOK START ---
-            {
-                int _is_rt = 0;
-                for(int _i=0; _i<%(cnt)s; _i++) {
-                    if(!strcmp(%(arr)s[_i].name, "MISC/") || !strcmp(%(arr)s[_i].name, "mc0:/")) {
-                        _is_rt = 1; break;
-                    }
-                }
-                if(_is_rt) {
-                    const char *w[] = {"ata0:/", "usb:/", "mass:/", "mc0:/", "mc1:/", "MISC/"};
-                    FILEINFO tmp[32];
-                    int n = 0;
-                    for(int _w=0; _w<6; _w++) {
-                        for(int _i=0; _i<%(cnt)s; _i++) {
-                            if(!strcmp(%(arr)s[_i].name, w[_w])) {
-                                tmp[n++] = %(arr)s[_i];
-                                break;
-                            }
-                        }
-                    }
-                    for(int _i=0; _i<n; _i++) %(arr)s[_i] = tmp[_i];
-                    %(cnt)s = n;
-                }
-            }
-            // --- AUTO SORT HOOK END ---
-        """
-
-        patched = False
-        for cfile in glob.glob("src/*.c"):
+        # 在全局 filer 相关源码中，直接把多余设备的注册字符串干掉或过滤
+        for cfile in glob.glob("src/filer*.c"):
             with open(cfile, "r", encoding="utf-8", errors="ignore") as f:
-                code = f.read()
+                content = f.read()
             
-            # 智能扫描源码：精准定位谁在构建 "mc0:/" 根目录
-            m = re.search(r'strn?cpy\s*\(\s*([a-zA-Z0-9_->]+)\s*\[[^\]]+\]\s*\.\s*name\s*,\s*"mc0:/"', code)
-            if m:
-                arr = m.group(1)
-                print(f"Found root array '{arr}' in {cfile}")
-                
-                # 顺藤摸瓜找到这个函数的 return 返回点
-                search_pos = m.end()
-                m_ret = re.search(r'\breturn\s+([^;]+);', code[search_pos:])
-                if m_ret:
-                    ret_expr = m_ret.group(1).strip()
-                    inject_pos = search_pos + m_ret.start()
-                    
-                    # 在 return 之前一秒，强行注入我们的洗牌代码！
-                    hook = hook_template % {'cnt': ret_expr, 'arr': arr}
-                    code = code[:inject_pos] + hook + "\n\treturn " + ret_expr + ";" + code[search_pos + m_ret.end():]
-                    
-                    with open(cfile, "w", encoding="utf-8") as f:
-                        f.write(code)
-                    print(f"-> Successfully hooked root device list in {cfile}!")
-                    patched = True
+            orig = content
+            # 将常见的多余设备名称替换为空格或直接屏蔽
+            for dev in ['"cdfs:/"', '"mx4sio:/"', '"hdd0:/"', '"mmce0:/"', '"udpfs:/"']:
+                content = content.replace(dev, '""')
+            
+            if content != orig:
+                with open(cfile, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(content)
+                print(f"Purged unwanted devices from {cfile}")
 
-        if not patched:
-            print("WARNING: Python injection failed to find mc0:/ array!")
-            sys.exit(1)
         EOF
         chmod +x scripts/ci/resolve_make_args.sh
 
@@ -149,8 +105,6 @@ jobs:
         if [ "${{ matrix.pad_profile }}" = "ds34" ]; then
           DS34_FLAG=1
         fi
-        
-        # 从编译源头彻底关死多余模块 (MX4SIO=0, UDPFS=0, ETH=0)
         make clean || true
         make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=0 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
 
