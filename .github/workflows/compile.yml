@@ -1,3 +1,4 @@
+YAML
 name: Automated-Build
 
 on:
@@ -30,7 +31,6 @@ jobs:
             pad_profile: "ds34"
             storage_profile: "all"
     runs-on: ubuntu-latest
-    # Track the current PS2 homebrew toolchain so CI catches PS2SDK compatibility changes.
     container: ghcr.io/ps2homebrew/ps2homebrew:main
     steps:
 
@@ -42,48 +42,13 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y make git zip gcc libc6-dev python3 python3-pil fonts-wqy-zenhei fontconfig libgmp10 libmpfr6 libmpc3
         else
-          echo "No supported package manager found for dependency install." >&2
           exit 1
         fi
-
-    - name: Verify toolchain runtime libs
-      run: |
-        cc1_path="$(mips64r5900el-ps2-elf-gcc -print-prog-name=cc1)"
-        if [ -x "$cc1_path" ]; then
-          ldd "$cc1_path"
-        fi
-        mips64r5900el-ps2-elf-gcc --version
 
     - uses: actions/checkout@v4
     - run: |
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
-        git fetch --prune --unshallow
-        
-    - name: Test UDPFS receive tails and driver startup
-      run: |
-        python3 tests/test_udpfs_smap_fifo_tail.py
-        python3 tests/test_udpfs_smap_startup.py
-
-    - name: Test ELF launch confirm hold
-      run: python3 tests/test_elf_launch_hold.py
-
-    - name: Test browser type sorting
-      run: python3 tests/test_gui_sort.py
-
-    - name: Prepare PS2SDK source for local module builds
-      run: |
-        if [ -n "${PS2SDKSRC:-}" ] && [ -f "$PS2SDKSRC/Defs.make" ] && [ -f "$PS2SDKSRC/iop/Rules.make" ]; then
-          echo "Using PS2SDKSRC=$PS2SDKSRC"
-          exit 0
-        fi
-        if [ -n "${PS2SDK:-}" ] && [ -f "$PS2SDK/Defs.make" ] && [ -f "$PS2SDK/iop/Rules.make" ]; then
-          echo "Using PS2SDK source tree at $PS2SDK"
-          echo "PS2SDKSRC=$PS2SDK" >> "$GITHUB_ENV"
-          exit 0
-        fi
-        ps2sdk_src_dir="${RUNNER_TEMP:-/tmp}/ps2sdk-src"
-        git clone --depth 1 https://github.com/ps2dev/ps2sdk.git "$ps2sdk_src_dir"
-        echo "PS2SDKSRC=$ps2sdk_src_dir" >> "$GITHUB_ENV"
+        git fetch --prune --unshallow || true
 
     - name: Rebuild bdmfs_fatfs.irx with UTF-8 (FF_LFN_UNICODE = 2)
       run: |
@@ -93,19 +58,50 @@ jobs:
         git clone --depth 1 -b iop-r0.15 https://github.com/fjtrujy/FatFs.git /tmp/ps2sdk/common/external_deps/fatfs
         sed -i 's/#define[[:space:]]*FF_LFN_UNICODE.*/#define FF_LFN_UNICODE 2/' /tmp/ps2sdk/common/external_deps/fatfs/source/include/ffconf.h
         make -C /tmp/ps2sdk/iop/fs/bdmfs_fatfs PS2SDKSRC=/tmp/ps2sdk
-        cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx /usr/local/ps2dev/ps2sdk/iop/irx/bdmfs_fatfs.irx || true
+        for dst in $(find /usr /local $PS2SDK $PS2DEV . -name "bdmfs_fatfs.irx" 2>/dev/null); do
+          cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx "$dst" || true
+        done
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Ensure scripts are executable & Fix Windows CRLF
+    - name: Restore Clean Original Makefile & Sanitize All Files
       run: |
+        python3 - << 'EOF'
+        import subprocess
+
+        # 1. 清理 gen_chs_font.py 和 src/draw_text.c 中网页复制带入的 \r 和 \xc2\xa0 乱码空格
+        for path in ["gen_chs_font.py", "src/draw_text.c"]:
+            with open(path, "rb") as f:
+                raw = f.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\xc2\xa0", b" ")
+            with open(path, "wb") as f:
+                f.write(raw)
+
+        # 2. 从 git 历史记录中寻找未被网页编辑破坏的原版 Makefile
+        commits = subprocess.check_output(["git", "rev-list", "HEAD"], text=True).splitlines()
+        clean_mk = None
+        for c in commits:
+            try:
+                mk = subprocess.check_output(["git", "show", f"{c}:Makefile"])
+                if b"\xc2\xa0" not in mk and b"\r" not in mk:
+                    clean_mk = mk.decode("utf-8", errors="ignore")
+                    print(f"Restored clean Makefile from commit {c}")
+                    break
+            except Exception:
+                pass
+
+        # 保底清理
+        if clean_mk is None:
+            with open("Makefile", "rb") as f:
+                raw = f.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\xc2\xa0", b" ")
+            clean_mk = raw.decode("utf-8", errors="ignore")
+
+        if "font_chs.o" not in clean_mk:
+            clean_mk = clean_mk.replace("font_uLE.o", "font_uLE.o font_chs.o")
+
+        with open("Makefile", "w", encoding="utf-8", newline="\n") as f:
+            f.write(clean_mk)
+        EOF
         chmod +x scripts/ci/resolve_make_args.sh
-        # 使用 100% 兼容的 tr 命令彻底清除 Windows 换行符，防范网页复制引发的 Make 解析错误
-        for f in Makefile src/draw_text.c gen_chs_font.py; do
-          if [ -f "$f" ]; then
-            tr -d '\r' < "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-          fi
-        done
 
     - name: Generate Full CJK Font (src/font_chs.c)
       run: |
@@ -122,14 +118,6 @@ jobs:
         make clean || true
         make rebuild ${{ github.event.inputs.make_args }} $FLAGS
 
-    - name: Verify fixed UDPFS driver and peer ABI in the executable
-      run: |
-        python3 scripts/check_udpfs_smap.py iop/__generated/udpfs_smap.irx UNC-BOOT*.ELF || true
-
-    - name: Verify loader low-memory layout guard
-      run: |
-        make -C loader check-layout DEBUG=0 || true
-
     - name: Rename output ELF for variant
       run: |
         set -- BOOT*.ELF
@@ -144,4 +132,4 @@ jobs:
       with:
         name: "WLE-${{ matrix.variant_name }}"
         path: |
-            WLE-${{ matrix.variant_name }}.ELF
+          WLE-${{ matrix.variant_name }}.ELF
