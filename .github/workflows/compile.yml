@@ -102,9 +102,11 @@ jobs:
             if nt != tt: open(tf, "w", encoding="utf-8", newline="\n").write(nt)
 
         adv = [(r'"Hide\s+HDD\s*:"', '"隐藏硬盘分区:"'), (r'"Hide\s+HDD"', '"隐藏硬盘分区"'), (r'"Hide\s+MC/MMCE\s*:"', '"隐藏空记忆卡/MMCE:"'), (r'"Hide\s+MC/MMCE"', '"隐藏空记忆卡/MMCE"'), (r'"Disable\s+EMBER\s+support\s*:"', '"禁用 EMBER 支持:"'), (r'"Disable\s+EMBER\s+support"', '"禁用 EMBER 支持"'), (r'"Disable\s+POPSTARTER\s+support\s*:"', '"禁用 POPSTARTER 支持:"'), (r'"Disable\s+POPSTARTER\s+support"', '"禁用 POPSTARTER 支持"'), (r'"Disable\s+NEUTRINO\s+support\s*:"', '"禁用 NEUTRINO 支持:"'), (r'"Disable\s+NEUTRINO\s+support"', '"禁用 NEUTRINO 支持"'), (r'"Show\s+All"', '"全部显示"'), (r'"Advanced\s+Settings\s*\.\.\."', '"高级设置..."'), (r'"Advanced\s+Settings"', '"高级设置"'), (r'"Default\s*:"', '"默认:   "')]
-        for cf in glob.glob("src/config*.c") + glob.glob("include/config*.h"):
+        # 无差别强制攻击：搜索所有的 C 和 H 文件，只要碰到 Advanced Settings 字符串就替换，绝不手软！
+        for cf in glob.glob("src/*.c") + glob.glob("include/*.h"):
             ct = open(cf, "r", encoding="utf-8", errors="ignore").read().replace("LNG(RETURN)", "LNG(Return)")
             for pat, rep in adv: ct = re.sub(pat, rep, ct, flags=re.IGNORECASE)
+            # 解决 config.c 中的动态组装问题：
             ct = re.sub(r'[A-Za-z0-9_]+\s*\(\s*LNG\(Advanced_Settings\)[^;]*\)', '"高级设置..."', ct)
             open(cf, "w", encoding="utf-8", newline="\n").write(ct)
 
