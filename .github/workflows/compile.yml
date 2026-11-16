@@ -79,7 +79,7 @@ jobs:
             t = open("Lang/ENG.LNG", "r", encoding="utf-8").read().replace('"返回主机界面"', '"返回主界面"')
             t = re.sub(r'lang\(\s*53\s*,\s*Add\s*,\s*"[^"]*"\s*\)', 'lang(53, Add, "向前")', t)
             t = re.sub(r'lang\(\s*54\s*,\s*Subtract\s*,\s*"[^"]*"\s*\)', 'lang(54, Subtract, "向后")', t)
-            t = re.sub(r'lang\(\s*131\s*,\s*Save_to\s*,\s*"[^"]*"\s*\)', 'lang(131, Save_to, "保存至")', t)
+            t = re.sub(r'lang\(\s*131\s*,\s*Save_to\s*,\s*"[^"]*"\s*\)', 'lang(131, Save_to, "保存到")', t)
             open("Lang/ENG.LNG", "w", encoding="utf-8", newline="\n").write(t)
             empty_lng = re.sub(r'(lang\(\s*\d+\s*,\s*[A-Za-z0-9_]+\s*,\s*)"[^"]*"(\s*\))', r'\1""\2', t)
             for lf in glob.glob("Lang/*.LNG"):
@@ -109,32 +109,39 @@ jobs:
             fb = fb.replace("browser_nfiles = setFileList(path, ext, files, cnfmode);", "browser_nfiles = ule_reorder_root_list(path, files, setFileList(path, ext, files, cnfmode));")
         open("src/filer_browser.c", "w", encoding="utf-8", newline="\n").write(fb)
 
-        # 终极 UI Hook：在所有文字画在屏幕上的前一秒，进行强制过滤
+        # 终极强迫症 Hook：强制清掉后面跟着的 "..."、修复乱码，并给“高级设置”前边补个空格对齐主菜单！
         if os.path.exists("src/draw_text.c"):
             dt = open("src/draw_text.c", "r", encoding="utf-8").read()
             hook = """
         int printXY(const char *s, int x, int y, u64 colour, int draw, int space) {
             char fixed[128];
             if (s != NULL && strstr(s, "Advanced Settings") != NULL) {
-                snprintf(fixed, sizeof(fixed), "高级设置...");
+                snprintf(fixed, sizeof(fixed), " 高级设置");
                 s = fixed;
-            } else if (s != NULL && (strstr(s, "Save to") != NULL || strstr(s, "保存亭") != NULL)) {
-                snprintf(fixed, sizeof(fixed), "保存至 ...");
+            } else if (s != NULL && (strstr(s, "Save to") != NULL || strstr(s, "保存亭") != NULL || strstr(s, "保存到") != NULL)) {
+                snprintf(fixed, sizeof(fixed), " 保存到");
                 s = fixed;
             } else if (s != NULL && strstr(s, "Disable EMBER") != NULL) {
-                snprintf(fixed, sizeof(fixed), "禁用 EMBER 支持:");
+                snprintf(fixed, sizeof(fixed), " 禁用 EMBER 支持:");
                 s = fixed;
             } else if (s != NULL && strstr(s, "Disable POPSTARTER") != NULL) {
-                snprintf(fixed, sizeof(fixed), "禁用 POPSTARTER 支持:");
+                snprintf(fixed, sizeof(fixed), " 禁用 POPSTARTER 支持:");
                 s = fixed;
             } else if (s != NULL && strstr(s, "Disable NEUTRINO") != NULL) {
-                snprintf(fixed, sizeof(fixed), "禁用 NEUTRINO 支持:");
+                snprintf(fixed, sizeof(fixed), " 禁用 NEUTRINO 支持:");
                 s = fixed;
             } else if (s != NULL && strstr(s, "Hide HDD") != NULL) {
-                snprintf(fixed, sizeof(fixed), "隐藏硬盘分区:");
+                snprintf(fixed, sizeof(fixed), " 隐藏硬盘分区:");
                 s = fixed;
             } else if (s != NULL && strstr(s, "Hide MC/MMCE") != NULL) {
-                snprintf(fixed, sizeof(fixed), "隐藏空记忆卡/MMCE:");
+                snprintf(fixed, sizeof(fixed), " 隐藏空记忆卡/MMCE:");
+                s = fixed;
+            } else if (s != NULL && strstr(s, "...") != NULL) {
+                // 如果其他菜单项带 ... 也一起拔掉，只留纯净的中文
+                strncpy(fixed, s, sizeof(fixed)-1);
+                fixed[sizeof(fixed)-1] = '\\0';
+                char *dot = strstr(fixed, "...");
+                if (dot != NULL) *dot = '\\0';
                 s = fixed;
             }
             """
