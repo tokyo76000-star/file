@@ -109,35 +109,34 @@ jobs:
             fb = fb.replace("browser_nfiles = setFileList(path, ext, files, cnfmode);", "browser_nfiles = ule_reorder_root_list(path, files, setFileList(path, ext, files, cnfmode));")
         open("src/filer_browser.c", "w", encoding="utf-8", newline="\n").write(fb)
 
-        # 终极强迫症 Hook：强制清掉后面跟着的 "..."、修复乱码，并给“高级设置”前边补个空格对齐主菜单！
+        # 完美对齐版 Hook：去掉多余空格，直出精美中文
         if os.path.exists("src/draw_text.c"):
             dt = open("src/draw_text.c", "r", encoding="utf-8").read()
             hook = """
         int printXY(const char *s, int x, int y, u64 colour, int draw, int space) {
             char fixed[128];
             if (s != NULL && strstr(s, "Advanced Settings") != NULL) {
-                snprintf(fixed, sizeof(fixed), " 高级设置");
+                snprintf(fixed, sizeof(fixed), "高级设置");
                 s = fixed;
             } else if (s != NULL && (strstr(s, "Save to") != NULL || strstr(s, "保存亭") != NULL || strstr(s, "保存到") != NULL)) {
-                snprintf(fixed, sizeof(fixed), " 保存到");
+                snprintf(fixed, sizeof(fixed), "保存到");
                 s = fixed;
             } else if (s != NULL && strstr(s, "Disable EMBER") != NULL) {
-                snprintf(fixed, sizeof(fixed), " 禁用 EMBER 支持:");
+                snprintf(fixed, sizeof(fixed), "禁用 EMBER 支持:");
                 s = fixed;
             } else if (s != NULL && strstr(s, "Disable POPSTARTER") != NULL) {
-                snprintf(fixed, sizeof(fixed), " 禁用 POPSTARTER 支持:");
+                snprintf(fixed, sizeof(fixed), "禁用 POPSTARTER 支持:");
                 s = fixed;
             } else if (s != NULL && strstr(s, "Disable NEUTRINO") != NULL) {
-                snprintf(fixed, sizeof(fixed), " 禁用 NEUTRINO 支持:");
+                snprintf(fixed, sizeof(fixed), "禁用 NEUTRINO 支持:");
                 s = fixed;
             } else if (s != NULL && strstr(s, "Hide HDD") != NULL) {
-                snprintf(fixed, sizeof(fixed), " 隐藏硬盘分区:");
+                snprintf(fixed, sizeof(fixed), "隐藏硬盘分区:");
                 s = fixed;
             } else if (s != NULL && strstr(s, "Hide MC/MMCE") != NULL) {
-                snprintf(fixed, sizeof(fixed), " 隐藏空记忆卡/MMCE:");
+                snprintf(fixed, sizeof(fixed), "隐藏空记忆卡/MMCE:");
                 s = fixed;
             } else if (s != NULL && strstr(s, "...") != NULL) {
-                // 如果其他菜单项带 ... 也一起拔掉，只留纯净的中文
                 strncpy(fixed, s, sizeof(fixed)-1);
                 fixed[sizeof(fixed)-1] = '\\0';
                 char *dot = strstr(fixed, "...");
