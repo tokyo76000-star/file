@@ -3,56 +3,88 @@ name: Build wLaunchELF_R3Z CHS
 on:
   push:
   workflow_dispatch:
+    inputs:
+      make_args:
+        description: pass extra make argumments to control features not explicitly handled by CI
 
 jobs:
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant_name: "R3Z"
+            psx_profile: "psx"
+            pad_profile: "no-ds34"
+            storage_profile: "all"
+          - variant_name: "R3Z-DS34"
+            psx_profile: "psx"
+            pad_profile: "ds34"
+            storage_profile: "all"
     runs-on: ubuntu-latest
-    container: ps2dev/ps2dev:latest
-
+    container: ghcr.io/ps2homebrew/ps2homebrew:main
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
-      - name: Install Python & Chinese Font
+      - name: Install dependencies
         run: |
-          apk update && apk add --no-cache python3 py3-pillow font-noto-cjk fontconfig git make gcc musl-dev || \
-          (apt-get update && apt-get install -y python3 python3-pil fonts-wqy-zenhei fontconfig git make gcc)
+          apk update && apk add --no-cache make git zip gcc musl-dev python3 gmp mpfr4 mpc1 py3-pillow font-noto-cjk fontconfig || \
+          (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y make git zip gcc libc6-dev python3 python3-pil fonts-wqy-zenhei fontconfig libgmp10 libmpfr6 libmpc3)
+
+      - uses: actions/checkout@v6
+      
+      - run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --prune --unshallow
 
       - name: Rebuild bdmfs_fatfs.irx with UTF-8 (FF_LFN_UNICODE = 2)
         run: |
           rm -rf /tmp/ps2sdk
           git clone --depth 1 https://github.com/ps2dev/ps2sdk.git /tmp/ps2sdk
-          
           mkdir -p /tmp/ps2sdk/common/external_deps
           git clone --depth 1 -b iop-r0.15 https://github.com/fjtrujy/FatFs.git /tmp/ps2sdk/common/external_deps/fatfs
-          
           sed -i 's/#define[[:space:]]*FF_LFN_UNICODE.*/#define FF_LFN_UNICODE 2/' /tmp/ps2sdk/common/external_deps/fatfs/source/include/ffconf.h
-          
           make -C /tmp/ps2sdk/iop/fs/bdmfs_fatfs PS2SDKSRC=/tmp/ps2sdk
-          
-          cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $PS2SDK/iop/irx/bdmfs_fatfs.irx
-          find . -name "bdmfs_fatfs.irx" -exec cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx {} \; || true
+          cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx /usr/local/ps2dev/ps2sdk/iop/irx/bdmfs_fatfs.irx || true
+          mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
+          cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
       - name: Generate Full CJK Font (src/font_chs.c)
         run: |
-          # 提前清理脚本文件的 Windows 换行符
           sed -i 's/\r$//' gen_chs_font.py || true
           python3 gen_chs_font.py
 
-      - name: Compile wLaunchELF_R3Z
+      - name: Ensure scripts are executable & Fix Makefile formatting
         run: |
-          # 核心修复：一键清理 Makefile 和 C 源码里由于网页复制产生的 Windows 换行符，防止报错！
-          find . -type f -name "Makefile" -exec sed -i 's/\r$//' {} \;
-          find . -type f -name "*.c" -exec sed -i 's/\r$//' {} \;
-          find . -type f -name "*.h" -exec sed -i 's/\r$//' {} \;
-          
-          make clean || true
-          make
+          chmod +x scripts/ci/resolve_make_args.sh
+          # 自动修复你在网页端复制粘贴导致的多余空格和回车换行符
+          sed -i 's/\r$//' Makefile
+          sed -i 's/[[:space:]]*$//' Makefile
+          sed -i 's/\r$//' src/draw_text.c
+          sed -i 's/[[:space:]]*$//' src/draw_text.c
 
-      - name: Upload ELF Artifact
+      - name: Compile wLaunchELF
+        run: |
+          FLAGS="$(scripts/ci/resolve_make_args.sh \
+            "${{ matrix.psx_profile }}" \
+            "${{ matrix.pad_profile }}" \
+            "${{ matrix.storage_profile }}" \
+            0 0)"
+          echo "Resolved make flags: $FLAGS"
+          make clean || true
+          make rebuild ${{ github.event.inputs.make_args }} $FLAGS
+
+      - name: Rename output ELF for variant
+        run: |
+          set -- BOOT*.ELF
+          if [ "$1" = 'BOOT*.ELF' ]; then
+            echo "No BOOT*.ELF produced by build." >&2
+            exit 1
+          fi
+          cp "$1" "WLE-${{ matrix.variant_name }}.ELF"
+
+      - name: Upload variants artifact ELF
         uses: actions/upload-artifact@v4
         with:
-          name: wLaunchELF_R3Z_CHS
+          name: "WLE-${{ matrix.variant_name }}"
           path: |
-            *.ELF
-            bin/*.ELF
+            WLE-${{ matrix.variant_name }}.ELF
