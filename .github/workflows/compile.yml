@@ -34,9 +34,9 @@ jobs:
           # 4. 编译驱动
           make -C /tmp/ps2sdk/iop/fs/bdmfs_fatfs PS2SDKSRC=/tmp/ps2sdk
           
-          # 5. 覆盖旧驱动
-          cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/obj/bdmfs_fatfs.irx $PS2SDK/iop/irx/bdmfs_fatfs.irx
-          find . -name "bdmfs_fatfs.irx" -exec cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/obj/bdmfs_fatfs.irx {} \; || true
+          # 5. 覆盖旧驱动 (注意这里改成从 irx/ 目录复制了！)
+          cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $PS2SDK/iop/irx/bdmfs_fatfs.irx
+          find . -name "bdmfs_fatfs.irx" -exec cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx {} \; || true
 
       - name: Generate Full CJK Font (src/font_chs.c)
         run: |
