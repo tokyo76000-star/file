@@ -57,122 +57,99 @@ jobs:
         git clone --depth 1 -b iop-r0.15 https://github.com/fjtrujy/FatFs.git /tmp/ps2sdk/common/external_deps/fatfs
         sed -i 's/#define[[:space:]]*FF_LFN_UNICODE.*/#define FF_LFN_UNICODE 2/' /tmp/ps2sdk/common/external_deps/fatfs/source/include/ffconf.h
         make -C /tmp/ps2sdk/iop/fs/bdmfs_fatfs PS2SDKSRC=/tmp/ps2sdk
-        for dst in $(find /usr /local $PS2SDK$PS2DEV . -name "bdmfs_fatfs.irx" 2>/dev/null); do
+        for dst in $(find /usr /local $PS2SDK $PS2DEV . -name "bdmfs_fatfs.irx" 2>/dev/null); do
           cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx "$dst" || true
         done
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Sanitize Files, Strip Unused Languages, Patch UI & Clean Makefile
+    - name: Sanitize, Strip Unused Languages & Patch UI
       run: |
         python3 - << 'EOF'
         import glob, os, re, subprocess
 
         for p in ["gen_chs_font.py", "src/draw_text.c", "src/filer_browser.c", "Lang/ENG.LNG"]:
-            if not os.path.exists(p):
-                continue
-            with open(p, "rb") as f:
-                raw = f.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\xc2\xa0", b" ")
-            lines = raw.decode("utf-8", errors="ignore").splitlines()
-            if lines and lines[0].strip().upper() in ("PYTHON", "C", "CPP", "MAKEFILE", "YAML"):
-                lines = lines[1:]
-            with open(p, "w", encoding="utf-8", newline="\n") as f:
-                f.write("\n".join(lines) + "\n")
+            if os.path.exists(p):
+                raw = open(p, "rb").read().replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\xc2\xa0", b" ")
+                lines = raw.decode("utf-8", errors="ignore").splitlines()
+                if lines and lines[0].strip().upper() in ("PYTHON", "C", "CPP", "MAKEFILE", "YAML"): lines = lines[1:]
+                open(p, "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
 
-        # 1. 修改 Lang/ENG.LNG 细节 ("返回主界面"、"向前/向后"、"高级设置")
         if os.path.exists("Lang/ENG.LNG"):
-            with open("Lang/ENG.LNG", "r", encoding="utf-8") as f:
-                lng_txt = f.read()
-            lng_txt = lng_txt.replace('"返回主机界面"', '"返回主界面"')
-            lng_txt = re.sub(r'lang\(\s*53\s*,\s*Add\s*,\s*"[^"]*"\s*\)', 'lang(53, Add, "向前")', lng_txt)
-            lng_txt = re.sub(r'lang\(\s*54\s*,\s*Subtract\s*,\s*"[^"]*"\s*\)', 'lang(54, Subtract, "向后")', lng_txt)
-            lng_txt = re.sub(r'lang\(\s*341\s*,\s*Advanced_Settings\s*,\s*"[^"]*"\s*\)', 'lang(341, Advanced_Settings, "高级设置")', lng_txt)
-            with open("Lang/ENG.LNG", "w", encoding="utf-8", newline="\n") as f:
-                f.write(lng_txt)
-
-        # 2. 彻底清空其余 8 国语言包内容并重定向，大幅减小 ELF 体积！
-        for lng_file in glob.glob("Lang/*.LNG"):
-            if os.path.basename(lng_file).upper() != "ENG.LNG":
-                with open("Lang/ENG.LNG", "r", encoding="utf-8") as f:
-                    eng_lines = f.read()
-                stripped_lng = re.sub(r'(lang\(\s*\d+\s*,\s*[A-Za-z0-9_]+\s*,\s*)"[^"]*"(\s*\))', r'\1""\2', eng_lines)
-                with open(lng_file, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(stripped_lng)
+            t = open("Lang/ENG.LNG", "r", encoding="utf-8").read().replace('"返回主机界面"', '"返回主界面"')
+            t = re.sub(r'lang\(\s*53\s*,\s*Add\s*,\s*"[^"]*"\s*\)', 'lang(53, Add, "向前")', t)
+            t = re.sub(r'lang\(\s*54\s*,\s*Subtract\s*,\s*"[^"]*"\s*\)', 'lang(54, Subtract, "向后")', t)
+            t = re.sub(r'lang\(\s*341\s*,\s*Advanced_Settings\s*,\s*"[^"]*"\s*\)', 'lang(341, Advanced_Settings, "高级设置")', t)
+            open("Lang/ENG.LNG", "w", encoding="utf-8", newline="\n").write(t)
+            empty_lng = re.sub(r'(lang\(\s*\d+\s*,\s*[A-Za-z0-9_]+\s*,\s*)"[^"]*"(\s*\))', r'\1""\2', t)
+            for lf in glob.glob("Lang/*.LNG"):
+                if os.path.basename(lf).upper() != "ENG.LNG":
+                    open(lf, "w", encoding="utf-8", newline="\n").write(empty_lng)
 
         if os.path.exists("src/lang.c"):
-            with open("src/lang.c", "r", encoding="utf-8") as f:
-                lc = f.read()
-            lc = lc.replace('"English"', '"中文"')
-            for other in ["FRE.LNG", "GER.LNG", "HUN.LNG", "ITA.LNG", "POL.LNG", "POR.LNG", "PTBR.LNG", "SPA.LNG"]:
-                lc = lc.replace(f'"Lang/{other}"', '"Lang/ENG.LNG"').replace(f'"{other}"', '"ENG.LNG"')
-            lc = re.sub(r'\bBUILTIN_LANGUAGE_COUNT\b', '1', lc)
-            with open("src/lang.c", "w", encoding="utf-8", newline="\n") as f:
-                f.write(lc)
+            lc = open("src/lang.c", "r", encoding="utf-8").read().replace('"English"', '"中文"')
+            for o in ["FRE.LNG", "GER.LNG", "HUN.LNG", "ITA.LNG", "POL.LNG", "POR.LNG", "PTBR.LNG", "SPA.LNG"]:
+                lc = lc.replace(f'"Lang/{o}"', '"Lang/ENG.LNG"').replace(f'"{o}"', '"ENG.LNG"')
+            open("src/lang.c", "w", encoding="utf-8", newline="\n").write(re.sub(r'\bBUILTIN_LANGUAGE_COUNT\b', '1', lc))
 
-        # 3. 把顶部软件名称改为纯中文 "文件管理"（不带版本号）
         if os.path.exists("include/launchelf.h"):
-            with open("include/launchelf.h", "r", encoding="utf-8") as f:
-                lh = f.read()
-            lh = re.sub(r'#define\s+ULE_VERSION\s+.*', '#define ULE_VERSION ""', lh)
-            with open("include/launchelf.h", "w", encoding="utf-8", newline="\n") as f:
-                f.write(lh)
+            lh = open("include/launchelf.h", "r", encoding="utf-8").read()
+            open("include/launchelf.h", "w", encoding="utf-8", newline="\n").write(re.sub(r'#define\s+ULE_VERSION\s+.*', '#define ULE_VERSION ""', lh))
 
-        for title_file in glob.glob("src/main*.c") + glob.glob("src/draw*.c") + glob.glob("src/gui*.c"):
-            with open(title_file, "r", encoding="utf-8", errors="ignore") as f:
-                tt = f.read()
-            orig_tt = tt
-            tt = tt.replace('"wLaunchELF " ULE_VERSION', '"文件管理"')
-            tt = tt.replace('"wLaunchELF "', '"文件管理"')
-            tt = tt.replace('"wLaunchELF"', '"文件管理"')
-            tt = re.sub(r'wLaunchELF\s*%s', '文件管理', tt)
-            if tt != orig_tt:
-                with open(title_file, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(tt)
-                print(f"Patched top header title in {title_file}")
+        for tf in glob.glob("src/main*.c") + glob.glob("src/draw*.c") + glob.glob("src/gui*.c"):
+            tt = open(tf, "r", encoding="utf-8", errors="ignore").read()
+            nt = re.sub(r'wLaunchELF\s*%s', '文件管理', tt.replace('"wLaunchELF " ULE_VERSION', '"文件管理"').replace('"wLaunchELF "', '"文件管理"').replace('"wLaunchELF"', '"文件管理"'))
+            if nt != tt: open(tf, "w", encoding="utf-8", newline="\n").write(nt)
 
-        # 4. 汉化高级设置 (config_advanced.c) 与主设置菜单 (config*.c) 遗漏的硬编码英文
-        adv_replacements = [
-            (r'"Hide\s+HDD\s*:"', '"隐藏硬盘分区:"'),
-            (r'"Hide\s+HDD"', '"隐藏硬盘分区"'),
-            (r'"Hide\s+MC/MMCE\s*:"', '"隐藏空记忆卡/MMCE:"'),
-            (r'"Hide\s+MC/MMCE"', '"隐藏空记忆卡/MMCE"'),
-            (r'"Disable\s+EMBER\s+support\s*:"', '"禁用 EMBER 支持:"'),
-            (r'"Disable\s+EMBER\s+support"', '"禁用 EMBER 支持"'),
-            (r'"Disable\s+POPSTARTER\s+support\s*:"', '"禁用 POPSTARTER 支持:"'),
-            (r'"Disable\s+POPSTARTER\s+support"', '"禁用 POPSTARTER 支持"'),
-            (r'"Disable\s+NEUTRINO\s+support\s*:"', '"禁用 NEUTRINO 支持:"'),
-            (r'"Disable\s+NEUTRINO\s+support"', '"禁用 NEUTRINO 支持"'),
-            (r'"Show\s+All"', '"全部显示"'),
-            (r'"Advanced\s+Settings\s*\.\.\."', '"高级设置..."'),
-            (r'"Advanced\s+Settings"', '"高级设置"'),
-            (r'"Default\s*:"', '"默认:   "'),
-        ]
-
-        for cfg_file in glob.glob("src/config*.c") + glob.glob("include/config*.h"):
-            with open(cfg_file, "r", encoding="utf-8", errors="ignore") as f:
-                ct = f.read()
-            ct = ct.replace("LNG(RETURN)", "LNG(Return)")
-            for pat, rep in adv_replacements:
-                ct = re.sub(pat, rep, ct, flags=re.IGNORECASE)
-            # 防止 config.c 把 LNG(Advanced_Settings) 拆开转小写导致 UTF-8 失效或回退英文
+        adv = [(r'"Hide\s+HDD\s*:"', '"隐藏硬盘分区:"'), (r'"Hide\s+HDD"', '"隐藏硬盘分区"'), (r'"Hide\s+MC/MMCE\s*:"', '"隐藏空记忆卡/MMCE:"'), (r'"Hide\s+MC/MMCE"', '"隐藏空记忆卡/MMCE"'), (r'"Disable\s+EMBER\s+support\s*:"', '"禁用 EMBER 支持:"'), (r'"Disable\s+EMBER\s+support"', '"禁用 EMBER 支持"'), (r'"Disable\s+POPSTARTER\s+support\s*:"', '"禁用 POPSTARTER 支持:"'), (r'"Disable\s+POPSTARTER\s+support"', '"禁用 POPSTARTER 支持"'), (r'"Disable\s+NEUTRINO\s+support\s*:"', '"禁用 NEUTRINO 支持:"'), (r'"Disable\s+NEUTRINO\s+support"', '"禁用 NEUTRINO 支持"'), (r'"Show\s+All"', '"全部显示"'), (r'"Advanced\s+Settings\s*\.\.\."', '"高级设置..."'), (r'"Advanced\s+Settings"', '"高级设置"'), (r'"Default\s*:"', '"默认:   "')]
+        for cf in glob.glob("src/config*.c") + glob.glob("include/config*.h"):
+            ct = open(cf, "r", encoding="utf-8", errors="ignore").read().replace("LNG(RETURN)", "LNG(Return)")
+            for pat, rep in adv: ct = re.sub(pat, rep, ct, flags=re.IGNORECASE)
             ct = re.sub(r'[A-Za-z0-9_]+\s*\(\s*LNG\(Advanced_Settings\)[^;]*\)', '"高级设置..."', ct)
-            with open(cfg_file, "w", encoding="utf-8", newline="\n") as f:
-                f.write(ct)
+            open(cf, "w", encoding="utf-8", newline="\n").write(ct)
 
-        # 5. 汉化主界面右侧设备描述 + 根目录只保留 ata0 -> usb -> mc0 -> mc1 -> MISC
-        with open("src/filer_browser.c", "r", encoding="utf-8") as f:
-            fb = f.read()
+        fb = open("src/filer_browser.c", "r", encoding="utf-8").read()
+        for k, v in [('{"mc0:/", "Memory Card 1"}', '{"mc0:/", "记忆卡插槽 1"}'), ('{"mc1:/", "Memory Card 2"}', '{"mc1:/", "记忆卡插槽 2"}'), ('{"hdd0:/", "HDD 1 (APA)"}', '{"hdd0:/", "内置硬盘 1 (APA)"}'), ('{"ata0:/", "HDD 1 (exFAT)"}', '{"ata0:/", "内置硬盘 1 (exFAT)"}'), ('{"cdfs:/", "CDVD Drive"}', '{"cdfs:/", "CD/DVD 光驱"}'), ('return "USB";', 'return "USB 存储设备";')]: fb = fb.replace(k, v)
+        fn = "static int ule_reorder_root_list(const char *p, FILEINFO *f, int c) { if (p[0]) return c; const char *w[] = {\"ata0:\",\"ata:\",\"usb:\",\"mass:\",\"mc0:\",\"mc1:\",\"MISC\"}; FILEINFO o[16]; int n=0,a,i,k,d; for(a=0;a<7;a++) for(i=0;i<c;i++) if(!strcmp(f[i].name,w[a])||(a==6&&!strcmp(f[i].name,LNG(MISC)))){ d=0; for(k=0;k<n;k++) if(!strcmp(o[k].name,f[i].name)) d=1; if(!d&&n<16) o[n++]=f[i]; break; } if(n>0){ for(i=0;i<n;i++) f[i]=o[i]; return n; } return c; }\n"
+        if "ule_reorder_root_list" not in fb:
+            fb = fb.replace("static int isHddBrowserPath", fn + "static int isHddBrowserPath", 1)
+            fb = fb.replace("browser_nfiles = setFileList(path, ext, files, cnfmode);", "browser_nfiles = ule_reorder_root_list(path, files, setFileList(path, ext, files, cnfmode));")
+        open("src/filer_browser.c", "w", encoding="utf-8", newline="\n").write(fb)
 
-        desc_map = {
-            '{"mc0:/", "Memory Card 1"}': '{"mc0:/", "记忆卡插槽 1"}',
-            '{"mc1:/", "Memory Card 2"}': '{"mc1:/", "记忆卡插槽 2"}',
-            '{"hdd0:/", "HDD 1 (APA)"}': '{"hdd0:/", "内置硬盘 1 (APA)"}',
-            '{"ata0:/", "HDD 1 (exFAT)"}': '{"ata0:/", "内置硬盘 1 (exFAT)"}',
-            '{"cdfs:/", "CDVD Drive"}': '{"cdfs:/", "CD/DVD 光驱"}',
-            'return "USB";': 'return "USB 存储设备";',
-        }
-        for k, v in desc_map.items():
-            fb = fb.replace(k, v)
+        for c in subprocess.check_output(["git", "rev-list", "HEAD"], text=True).splitlines():
+            mk = subprocess.check_output(["git", "show", f"{c}:Makefile"])
+            if b"\xc2\xa0" not in mk and b"extraneous" not in mk and len(mk.splitlines()) > 120:
+                cmk = mk.decode("utf-8", errors="ignore").replace("\r\n", "\n")
+                if "font_chs.o" not in cmk: cmk = cmk.replace("font_uLE.o", "font_uLE.o font_chs.o")
+                open("Makefile", "w", encoding="utf-8", newline="\n").write(cmk)
+                break
+        EOF
+        chmod +x scripts/ci/resolve_make_args.sh
 
-        helper = """
-        static int ule_reorder_root_list(const char *path,
+    - name: Generate Full CJK Font (src/font_chs.c)
+      run: |
+        python3 gen_chs_font.py
+
+    - name: Compile wLaunchELF
+      run: |
+        DS34_FLAG=0
+        if [ "${{ matrix.pad_profile }}" = "ds34" ]; then
+          DS34_FLAG=1
+        fi
+        make clean || true
+        make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=0 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
+
+    - name: Rename output ELF for variant
+      run: |
+        set -- BOOT*.ELF
+        if [ "$1" = 'BOOT*.ELF' ]; then
+          exit 1
+        fi
+        cp "$1" "WLE-${{ matrix.variant_name }}.ELF"
+
+    - name: Upload variants artifact ELF
+      uses: actions/upload-artifact@v4
+      with:
+        name: "WLE-${{ matrix.variant_name }}"
+        path: |
+          WLE-${{ matrix.variant_name }}.ELF
