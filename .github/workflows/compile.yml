@@ -63,7 +63,7 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Sanitize, Strip Unused Languages & Patch UI
+    - name: Sanitize, Strip Languages, Reorder Root & Hook UI Text
       run: |
         python3 - << 'EOF'
         import glob, os, re, subprocess
@@ -79,7 +79,7 @@ jobs:
             t = open("Lang/ENG.LNG", "r", encoding="utf-8").read().replace('"返回主机界面"', '"返回主界面"')
             t = re.sub(r'lang\(\s*53\s*,\s*Add\s*,\s*"[^"]*"\s*\)', 'lang(53, Add, "向前")', t)
             t = re.sub(r'lang\(\s*54\s*,\s*Subtract\s*,\s*"[^"]*"\s*\)', 'lang(54, Subtract, "向后")', t)
-            t = re.sub(r'lang\(\s*341\s*,\s*Advanced_Settings\s*,\s*"[^"]*"\s*\)', 'lang(341, Advanced_Settings, "高级设置")', t)
+            t = re.sub(r'lang\(\s*131\s*,\s*Save_to\s*,\s*"[^"]*"\s*\)', 'lang(131, Save_to, "保存至")', t)
             open("Lang/ENG.LNG", "w", encoding="utf-8", newline="\n").write(t)
             empty_lng = re.sub(r'(lang\(\s*\d+\s*,\s*[A-Za-z0-9_]+\s*,\s*)"[^"]*"(\s*\))', r'\1""\2', t)
             for lf in glob.glob("Lang/*.LNG"):
@@ -101,15 +101,6 @@ jobs:
             nt = re.sub(r'wLaunchELF\s*%s', '文件管理', tt.replace('"wLaunchELF " ULE_VERSION', '"文件管理"').replace('"wLaunchELF "', '"文件管理"').replace('"wLaunchELF"', '"文件管理"'))
             if nt != tt: open(tf, "w", encoding="utf-8", newline="\n").write(nt)
 
-        adv = [(r'"Hide\s+HDD\s*:"', '"隐藏硬盘分区:"'), (r'"Hide\s+HDD"', '"隐藏硬盘分区"'), (r'"Hide\s+MC/MMCE\s*:"', '"隐藏空记忆卡/MMCE:"'), (r'"Hide\s+MC/MMCE"', '"隐藏空记忆卡/MMCE"'), (r'"Disable\s+EMBER\s+support\s*:"', '"禁用 EMBER 支持:"'), (r'"Disable\s+EMBER\s+support"', '"禁用 EMBER 支持"'), (r'"Disable\s+POPSTARTER\s+support\s*:"', '"禁用 POPSTARTER 支持:"'), (r'"Disable\s+POPSTARTER\s+support"', '"禁用 POPSTARTER 支持"'), (r'"Disable\s+NEUTRINO\s+support\s*:"', '"禁用 NEUTRINO 支持:"'), (r'"Disable\s+NEUTRINO\s+support"', '"禁用 NEUTRINO 支持"'), (r'"Show\s+All"', '"全部显示"'), (r'"Advanced\s+Settings\s*\.\.\."', '"高级设置..."'), (r'"Advanced\s+Settings"', '"高级设置"'), (r'"Default\s*:"', '"默认:   "')]
-        # 无差别强制攻击：搜索所有的 C 和 H 文件，只要碰到 Advanced Settings 字符串就替换，绝不手软！
-        for cf in glob.glob("src/*.c") + glob.glob("include/*.h"):
-            ct = open(cf, "r", encoding="utf-8", errors="ignore").read().replace("LNG(RETURN)", "LNG(Return)")
-            for pat, rep in adv: ct = re.sub(pat, rep, ct, flags=re.IGNORECASE)
-            # 解决 config.c 中的动态组装问题：
-            ct = re.sub(r'[A-Za-z0-9_]+\s*\(\s*LNG\(Advanced_Settings\)[^;]*\)', '"高级设置..."', ct)
-            open(cf, "w", encoding="utf-8", newline="\n").write(ct)
-
         fb = open("src/filer_browser.c", "r", encoding="utf-8").read()
         for k, v in [('{"mc0:/", "Memory Card 1"}', '{"mc0:/", "记忆卡插槽 1"}'), ('{"mc1:/", "Memory Card 2"}', '{"mc1:/", "记忆卡插槽 2"}'), ('{"hdd0:/", "HDD 1 (APA)"}', '{"hdd0:/", "内置硬盘 1 (APA)"}'), ('{"ata0:/", "HDD 1 (exFAT)"}', '{"ata0:/", "内置硬盘 1 (exFAT)"}'), ('{"cdfs:/", "CDVD Drive"}', '{"cdfs:/", "CD/DVD 光驱"}'), ('return "USB";', 'return "USB 存储设备";')]: fb = fb.replace(k, v)
         fn = "static int ule_reorder_root_list(const char *p, FILEINFO *f, int c) { if (p[0]) return c; const char *w[] = {\"ata0:\",\"ata:\",\"usb:\",\"mass:\",\"mc0:\",\"mc1:\",\"MISC\"}; FILEINFO o[16]; int n=0,a,i,k,d; for(a=0;a<7;a++) for(i=0;i<c;i++) if(!strcmp(f[i].name,w[a])||(a==6&&!strcmp(f[i].name,LNG(MISC)))){ d=0; for(k=0;k<n;k++) if(!strcmp(o[k].name,f[i].name)) d=1; if(!d&&n<16) o[n++]=f[i]; break; } if(n>0){ for(i=0;i<n;i++) f[i]=o[i]; return n; } return c; }\n"
@@ -117,6 +108,38 @@ jobs:
             fb = fb.replace("static int isHddBrowserPath", fn + "static int isHddBrowserPath", 1)
             fb = fb.replace("browser_nfiles = setFileList(path, ext, files, cnfmode);", "browser_nfiles = ule_reorder_root_list(path, files, setFileList(path, ext, files, cnfmode));")
         open("src/filer_browser.c", "w", encoding="utf-8", newline="\n").write(fb)
+
+        # 终极 UI Hook：在所有文字画在屏幕上的前一秒，进行强制过滤
+        if os.path.exists("src/draw_text.c"):
+            dt = open("src/draw_text.c", "r", encoding="utf-8").read()
+            hook = """
+        int printXY(const char *s, int x, int y, u64 colour, int draw, int space) {
+            char fixed[128];
+            if (s != NULL && strstr(s, "Advanced Settings") != NULL) {
+                snprintf(fixed, sizeof(fixed), "高级设置...");
+                s = fixed;
+            } else if (s != NULL && (strstr(s, "Save to") != NULL || strstr(s, "保存亭") != NULL)) {
+                snprintf(fixed, sizeof(fixed), "保存至 ...");
+                s = fixed;
+            } else if (s != NULL && strstr(s, "Disable EMBER") != NULL) {
+                snprintf(fixed, sizeof(fixed), "禁用 EMBER 支持:");
+                s = fixed;
+            } else if (s != NULL && strstr(s, "Disable POPSTARTER") != NULL) {
+                snprintf(fixed, sizeof(fixed), "禁用 POPSTARTER 支持:");
+                s = fixed;
+            } else if (s != NULL && strstr(s, "Disable NEUTRINO") != NULL) {
+                snprintf(fixed, sizeof(fixed), "禁用 NEUTRINO 支持:");
+                s = fixed;
+            } else if (s != NULL && strstr(s, "Hide HDD") != NULL) {
+                snprintf(fixed, sizeof(fixed), "隐藏硬盘分区:");
+                s = fixed;
+            } else if (s != NULL && strstr(s, "Hide MC/MMCE") != NULL) {
+                snprintf(fixed, sizeof(fixed), "隐藏空记忆卡/MMCE:");
+                s = fixed;
+            }
+            """
+            dt = dt.replace("int printXY(const char *s, int x, int y, u64 colour, int draw, int space)\n{", hook)
+            open("src/draw_text.c", "w", encoding="utf-8", newline="\n").write(dt)
 
         for c in subprocess.check_output(["git", "rev-list", "HEAD"], text=True).splitlines():
             mk = subprocess.check_output(["git", "show", f"{c}:Makefile"])
