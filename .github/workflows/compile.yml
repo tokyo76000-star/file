@@ -63,7 +63,7 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Sanitize Files, Patch UI Fixes, Root Order & Clean Makefile
+    - name: Sanitize Files, Strip Unused Languages, Patch UI & Clean Makefile
       run: |
         python3 - << 'EOF'
         import glob, os, re, subprocess
@@ -79,10 +79,7 @@ jobs:
             with open(p, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(lines) + "\n")
 
-        # 1. 修改 Lang/ENG.LNG：
-        #    - "返回主机界面" -> "返回主界面"
-        #    - Add ("增加") -> "向前"，Subtract ("减少") -> "向后"
-        #    - Advanced_Settings -> "高级设置"
+        # 1. 修改 Lang/ENG.LNG 细节 ("返回主界面"、"向前/向后"、"高级设置")
         if os.path.exists("Lang/ENG.LNG"):
             with open("Lang/ENG.LNG", "r", encoding="utf-8") as f:
                 lng_txt = f.read()
@@ -93,41 +90,43 @@ jobs:
             with open("Lang/ENG.LNG", "w", encoding="utf-8", newline="\n") as f:
                 f.write(lng_txt)
 
-        # 2. 把默认内置语言显示名 "English" 改成 "中文"
+        # 2. 彻底清空其余 8 国语言包内容并重定向，大幅减小 ELF 体积！
+        for lng_file in glob.glob("Lang/*.LNG"):
+            if os.path.basename(lng_file).upper() != "ENG.LNG":
+                with open("Lang/ENG.LNG", "r", encoding="utf-8") as f:
+                    eng_lines = f.read()
+                # 将所有非 ENG.LNG 的字符串置为空字符串 ""，使编译器合并常量池实现极限瘦身
+                stripped_lng = re.sub(r'(lang\(\s*\d+\s*,\s*[A-Za-z0-9_]+\s*,\s*)"[^"]*"(\s*\))', r'\1""\2', eng_lines)
+                with open(lng_file, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(stripped_lng)
+                print(f"Stripped unused language file: {lng_file}")
+
         if os.path.exists("src/lang.c"):
             with open("src/lang.c", "r", encoding="utf-8") as f:
                 lc = f.read()
             lc = lc.replace('"English"', '"中文"')
+            # 让 src/lang.c 若引用其它 .LNG 文件时直接引用 ENG.LNG，从而让编译器彻底丢弃多余表
+            for other in ["FRE.LNG", "GER.LNG", "HUN.LNG", "ITA.LNG", "POL.LNG", "POR.LNG", "PTBR.LNG", "SPA.LNG"]:
+                lc = lc.replace(f'"Lang/{other}"', '"Lang/ENG.LNG"').replace(f'"{other}"', '"ENG.LNG"')
+            # 如果语言切换限制在 BUILTIN_LANGUAGE_COUNT，将其锁定为只切换默认中文
+            lc = re.sub(r'\bBUILTIN_LANGUAGE_COUNT\b', '1', lc)
             with open("src/lang.c", "w", encoding="utf-8", newline="\n") as f:
                 f.write(lc)
 
-        # 3. 彻底干掉 config*.c 里的 "Advanced Settings..." 和 "换行"
+        # 3. 修复设置界面里的 "换行" -> "返回" 并通杀任何形式的 "Advanced Settings"
         for cfg_file in glob.glob("src/config*.c"):
             with open(cfg_file, "r", encoding="utf-8", errors="ignore") as f:
                 ct = f.read()
-            # 打印所有包含 Advanced 的行到 Actions 日志，让它无处遁形
-            for idx, line in enumerate(ct.splitlines()):
-                if "Advanced" in line or "advanced" in line:
-                    print(f"[{cfg_file}:{idx+1}] {line.strip()}")
             ct = ct.replace("LNG(RETURN)", "LNG(Return)")
-            # 如果 config.c 用了辅助函数格式化 Advanced_Settings 或硬编码了英文，直接强制替换为 "高级设置"
-            ct = re.sub(r'"Advanced\s+Settings(\.\.\.)?"', lambda m: '"高级设置..."' if m.group(1) else '"高级设置"', ct, flags=re.IGNORECASE)
-            ct = ct.replace('LNG(Advanced_Settings)', '"高级设置"')
-            ct = ct.replace('LNG_DEF(Advanced_Settings)', '"高级设置"')
+            # 拦截 config.c 里将 "ADVANCED SETTINGS" 转成大小写或拼接省略号的逻辑
+            ct = re.sub(r'format[A-Za-z0-9_]*\(\s*LNG\(Advanced_Settings\)\s*\)', '"高级设置"', ct)
+            ct = re.sub(r'"Advanced\s+Settings\s*(\.\.\.)?"', lambda m: '"高级设置..."' if m.group(1) else '"高级设置"', ct, flags=re.IGNORECASE)
+            # 如果源码用函数来把全大写转成首字母大写 (Title Case)，遇到中文高字节(>0x7F)时直接原样输出不破坏UTF-8
+            ct = re.sub(r"if\s*\(\s*([a-zA-Z0-9_\[\]\*]+)\s*>=\s*'A'\s*&&\s*\1\s*<=\s*'Z'\s*\)", r"if (0)", ct)
             with open(cfg_file, "w", encoding="utf-8", newline="\n") as f:
                 f.write(ct)
 
-        # 4. 全局扫描所有 C/H 文件里残留的 Advanced Settings
-        for code_file in glob.glob("src/*.c") + glob.glob("include/*.h"):
-            with open(code_file, "r", encoding="utf-8", errors="ignore") as f:
-                ctxt = f.read()
-            new_ctxt = re.sub(r'"Advanced\s+Settings\.\.\."', '"高级设置..."', ctxt, flags=re.IGNORECASE)
-            new_ctxt = re.sub(r'"Advanced\s+Settings"', '"高级设置"', new_ctxt, flags=re.IGNORECASE)
-            if new_ctxt != ctxt:
-                with open(code_file, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(new_ctxt)
-
-        # 5. 汉化主界面右侧设备描述 + 根目录只保留 ata0 -> usb -> mc0 -> mc1 -> MISC
+        # 4. 汉化主界面右侧设备描述 + 根目录只保留 ata0 -> usb -> mc0 -> mc1 -> MISC
         with open("src/filer_browser.c", "r", encoding="utf-8") as f:
             fb = f.read()
 
