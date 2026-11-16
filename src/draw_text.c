@@ -3,6 +3,8 @@
 //--------------------------------------------------------------
 #include "draw_private.h"
 
+extern const unsigned char* get_chs_glyph(unsigned int cp);
+
 //The font file ELISA100.FNT is needed to display MC save titles in japanese
 //and the arrays defined here are needed to find correct data in that file
 const u16 font404[] = {
@@ -26,7 +28,7 @@ const u16 font404[] = {
     0xF4A5, 1030,
     0, 0};
 
-// ASCII��SJIS�̕ϊ��p�z��
+// ASCII->SJIS lookup tables
 static const u8 sjis_lookup_81[256] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  // 0x00
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  // 0x10
@@ -150,11 +152,38 @@ void drawChar2(int n, int x, int y, u64 colour)
 		}
 	}
 }
+
+static void drawChar_CHS(const unsigned char *glyph, int x, int y, u64 colour)
+{
+	int i, j, pixBase, pixMask;
+
+	updateScr_1 = 1;
+
+	for (i = 0; i < 16; i++) {
+		pixBase = -1;
+		pixMask = 0x80 >> (i & 7);
+		for (j = 0; j < 16; j++) {
+			u8 byte_val = glyph[j * 2 + (i >> 3)];
+			if ((pixBase < 0) && (byte_val & pixMask)) {
+				pixBase = j;
+			} else if ((pixBase > -1) && !(byte_val & pixMask)) {
+				gsKit_prim_sprite(gsGlobal, x + i, y + pixBase - 1, x + i + 1, y + j - 1, 1, colour);
+				pixBase = -1;
+			}
+		}
+		if (pixBase > -1)
+			gsKit_prim_sprite(gsGlobal, x + i, y + pixBase - 1, x + i + 1, y + j - 1, 1, colour);
+	}
+}
+
 int printXY(const char *s, int x, int y, u64 colour, int draw, int space)
 {
-	unsigned int c1, c2;
+	unsigned int c1, c2, cp;
 	int i;
 	int text_spacing = 8;
+
+	if (!s)
+		return x;
 
 	if (space > 0) {
 		while ((strlen(s) * text_spacing) > space)
@@ -167,36 +196,77 @@ int printXY(const char *s, int x, int y, u64 colour, int draw, int space)
 	}
 
 	i = 0;
-	while ((c1 = (unsigned char)s[i++]) != 0) {
-		if (c1 != 0xFF) {  // Normal character
-			if (draw)
+	while ((c1 = (unsigned char)s[i]) != 0) {
+		// 1. Handle wLaunchELF internal button icon sequences (\xff + '0'..'=' )
+		if (c1 == 0xFF) {
+			i++;
+			if ((c2 = (unsigned char)s[i]) == 0)
+				break;
+			i++;
+			if ((c2 < '0') || (c2 > '='))
+				continue;
+			c1 = (c2 - '0') * 2 + 0x100;
+			if (draw) {
 				drawChar(c1, x, y, colour);
-			x += text_spacing;
-			if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
-				break;
+				x += 8;
+				if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
+					break;
+				drawChar(c1 + 1, x, y, colour);
+				x += 8;
+				if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
+					break;
+			} else {
+				x += 16;
+			}
 			continue;
-		}  //End if for normal character
-		// Here we got a sequence starting with 0xFF ('\xff')
-		if ((c2 = (unsigned char)s[i++]) == 0)
-			break;
-		if ((c2 < '0') || (c2 > '='))
-			continue;
-		c1 = (c2 - '0') * 2 + 0x100;
-		if (draw) {
-			//expand sequence �0=Circle  �1=Cross  �2=Square  �3=Triangle  �4=FilledBox
-			//"\xff:"=Pad_Right  "\xff;"=Pad_Down  "\xff<"=Pad_Left  "\xff="=Pad_Up
-			drawChar(c1, x, y, colour);
-			x += 8;
-			if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
-				break;
-			drawChar(c1 + 1, x, y, colour);
-			x += 8;
-			if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
-				break;
 		}
-	}  // ends while(1)
+
+		// 2. Decode UTF-8 multi-byte sequences (Chinese / Japanese / Full-width symbols)
+		if (c1 >= 0x80) {
+			const unsigned char *u = (const unsigned char *)&s[i];
+			if ((u[0] & 0xE0) == 0xC0 && (u[1] & 0xC0) == 0x80) {
+				cp = ((u[0] & 0x1F) << 6) | (u[1] & 0x3F);
+				i += 2;
+			} else if ((u[0] & 0xF0) == 0xE0 && (u[1] & 0xC0) == 0x80 && (u[2] & 0xC0) == 0x80) {
+				cp = ((u[0] & 0x0F) << 12) | ((u[1] & 0x3F) << 6) | (u[2] & 0x3F);
+				i += 3;
+			} else if ((u[0] & 0xF8) == 0xF0 && (u[1] & 0xC0) == 0x80 && (u[2] & 0xC0) == 0x80 && (u[3] & 0xC0) == 0x80) {
+				cp = ((u[0] & 0x07) << 18) | ((u[1] & 0x3F) << 12) | ((u[2] & 0x3F) << 6) | (u[3] & 0x3F);
+				i += 4;
+			} else {
+				cp = c1;
+				i++;
+			}
+
+			const unsigned char *glyph = get_chs_glyph(cp);
+			int adv = glyph ? (text_spacing * 2) : text_spacing;
+			if (adv < 12 && glyph)
+				adv = 12;
+
+			if (x + adv > SCREEN_WIDTH - SCREEN_MARGIN)
+				break;
+
+			if (draw) {
+				if (glyph)
+					drawChar_CHS(glyph, x, y, colour);
+				else
+					drawChar('?', x, y, colour);
+			}
+			x += adv;
+			continue;
+		}
+
+		// 3. Standard ASCII character
+		i++;
+		if (draw)
+			drawChar(c1, x, y, colour);
+		x += text_spacing;
+		if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
+			break;
+	}
 	return x;
 }
+
 int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 {
 	int n;
@@ -212,7 +282,7 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 			code = (code << 8) + s[i++];
 
 			switch (code) {
-				// Circle == "��"
+				// Circle
 				case 0x819B:
 					if (draw) {
 						drawChar(0x100, x, y, colour);
@@ -228,7 +298,7 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 					}
 					x += 16;
 					break;
-				// Square == "��"
+				// Square
 				case 0x81A0:
 					if (draw) {
 						drawChar(0x104, x, y, colour);
@@ -236,7 +306,7 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 					}
 					x += 16;
 					break;
-				// Triangle == "��"
+				// Triangle
 				case 0x81A2:
 					if (draw) {
 						drawChar(0x106, x, y, colour);
@@ -244,7 +314,7 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 					}
 					x += 16;
 					break;
-				// FilledBox == "��"
+				// FilledBox
 				case 0x81A1:
 					if (draw) {
 						drawChar(0x108, x, y, colour);
@@ -257,7 +327,7 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 						tmp = y;
 						if (code <= 0x829A)
 							tmp++;
-						// SJIS����EUC�ɕϊ�
+						// SJIS to EUC
 						if (code >= 0xE000)
 							code -= 0x4000;
 						code = ((((code >> 8) & 0xFF) - 0x81) << 9) + (code & 0x00FF);
@@ -269,7 +339,6 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 							code -= 0x40;
 						code += 0x2121 + 0x8080;
 
-						// EUC����b�����t�H���g�̔ԍ��𐶐�
 						n = (((code >> 8) & 0xFF) - 0xA1) * (0xFF - 0xA1) + (code & 0xFF) - 0xA1;
 						j = 0;
 						while (font404[j]) {
