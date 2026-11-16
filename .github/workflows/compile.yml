@@ -62,10 +62,10 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Write Clean Makefile & FORCE Sort Root Devices
+    - name: Write Clean Makefile & Force Root Device Order (ata0 -> usb -> mc0 -> mc1 -> hdd0 -> mx4sio -> MISC)
       run: |
         python3 - << 'EOF'
-        import glob, os, re
+        import glob, os, re, sys
 
         for p in ["gen_chs_font.py", "src/draw_text.c"]:
             if not os.path.exists(p): continue
@@ -77,63 +77,97 @@ jobs:
             with open(p, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(lines) + "\n")
 
-        # 终极暴力排序 C 语言外挂函数：直接接管内存数组！
-        hook_code = r"""
-        static int ule_filter_and_sort_root_devices(void *vfiles, int count) {
-            FILEINFO *files = (FILEINFO *)vfiles;
-            const char *wanted_order[] = {"ata0:/", "usb:/", "mass:/", "mc0:/", "mc1:/", "hdd0:/", "MISC/"};
-            FILEINFO temp[32];
+        # 通用重排与过滤函数：只允许 ata0:/ -> usb:/ -> mc0:/ -> mc1:/ -> hdd0:/ -> mx4sio:/ -> MISC/
+        filter_func = r"""
+        static int ule_force_root_order(FILEINFO *files, int count) {
+            const char *order[] = {"ata0:/", "usb:/", "mass:/", "mc0:/", "mc1:/", "hdd0:/", "mx4sio:/", "MISC/"};
+            int i, w, matched = 0;
+            for (i = 0; i < count; i++) {
+                if (!strcmp(files[i].name, "mc0:/") || !strcmp(files[i].name, "MISC/")) {
+                    matched = 1;
+                    break;
+                }
+            }
+            if (!matched) return count;
+            FILEINFO tmp[32];
             int new_cnt = 0;
-            int w, idx;
-            for (w = 0; w < 7; w++) {
-                for (idx = 0; idx < count; idx++) {
-                    if (!strcmp(files[idx].name, wanted_order[w])) {
-                        if (new_cnt < 32) temp[new_cnt++] = files[idx];
+            for (w = 0; w < 8; w++) {
+                for (i = 0; i < count; i++) {
+                    if (!strcmp(files[i].name, order[w])) {
+                        if (new_cnt < 32) tmp[new_cnt++] = files[i];
                         break;
                     }
                 }
             }
             if (new_cnt > 0) {
-                for (idx = 0; idx < new_cnt; idx++) files[idx] = temp[idx];
+                for (i = 0; i < new_cnt; i++) files[i] = tmp[i];
                 return new_cnt;
             }
             return count;
         }
         """
 
-        for cfile in glob.glob("src/filer*.c"):
+        patched_count = 0
+        for cfile in sorted(glob.glob("src/filer*.c") + glob.glob("src/*.c")):
             with open(cfile, "r", encoding="utf-8", errors="ignore") as f:
                 txt = f.read()
-            if '"MISC/"' in txt and '"mc0:/"' in txt:
-                print(f"-> 发现设备列表生成文件: {cfile}")
-                if "ule_filter_and_sort_root_devices" not in txt:
-                    txt = re.sub(r'(#include\s+"[^"]+"\s*\n)', r'\1' + hook_code + '\n', txt, count=1)
-                
-                # 寻找 MISC/ 的注入点
-                m = re.search(r'strcpy\s*\(\s*([^\[]+)\[([^\]]+)\]\.name\s*,\s*"MISC/"\s*\)\s*;', txt)
-                if m:
-                    arr_name = m.group(1).strip()
-                    idx_name = m.group(2).strip()
-                    post_txt = txt[m.end():]
-                    
-                    # 尝试在 return 之前拦截
-                    m_ret = re.search(r'\breturn\s+' + idx_name + r'\s*;', post_txt)
-                    if m_ret:
-                        insert_pos = m.end() + m_ret.start()
-                        injection = f"\n\t{idx_name} = ule_filter_and_sort_root_devices({arr_name}, {idx_name});\n"
-                        txt = txt[:insert_pos] + injection + txt[insert_pos:]
-                        print("=> 成功: 在 return 处强行接管了设备列表！")
-                    else:
-                        # 备用方案：在计数器增加后拦截
-                        m_inc = re.search(r'(\b' + idx_name + r'\s*\+\+\s*;)', post_txt)
-                        if m_inc:
-                            insert_pos = m.end() + m_inc.end()
-                            injection = f"\n\t{idx_name} = ule_filter_and_sort_root_devices({arr_name}, {idx_name});\n"
-                            txt = txt[:insert_pos] + injection + txt[insert_pos:]
-                            print("=> 成功: 在 ++ 处强行接管了设备列表！")
-                
-                with open(cfile, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(txt)
+
+            # 寻找任何包含 "HDD 1 (exFAT)" 或 "Memory Card 1" 或 getDir 的文件
+            if any(k in txt for k in ['"HDD 1 (exFAT)"', '"Memory Card 1"', '"CDVD Drive"', 'getDir']):
+                print(f"Inspecting {cfile}...")
+                orig = txt
+
+                # 1. 如果文件中定义了 getDir 函数，直接把 getDir 改名为 getDir_raw 并用外挂包装函数接管返回值！
+                m_getdir = re.search(r'\bint\s+getDir\s*\(\s*(const\s+char\s*\*\s*\w+|char\s*\*\s*\w+)\s*,\s*FILEINFO\s*\*\s*(\w+)\s*\)', txt)
+                if m_getdir and "ule_force_root_order" not in txt:
+                    txt = txt[:m_getdir.start()] + filter_func + "\nint getDir_raw(" + m_getdir.group(1) + ", FILEINFO *" + m_getdir.group(2) + ")" + txt[m_getdir.end():]
+                    wrapper = f"""
+        int getDir({m_getdir.group(1)}, FILEINFO *files) {{
+            int cnt = getDir_raw(path, files);
+            return ule_force_root_order(files, cnt);
+        }}
+        """
+                    # 提取第一个参数变量名
+                    arg1_name = m_getdir.group(1).split()[-1].replace("*", "").strip()
+                    wrapper = wrapper.replace("getDir_raw(path,", f"getDir_raw({arg1_name},")
+                    txt = txt + "\n" + wrapper
+                    patched_count += 1
+                    print(f"=> Hooked getDir() in {cfile}!")
+
+                # 2. 如果存在静态结构体表定义（如包含 "mc0:/" 和 "ata0:/" 的表），或者填充根目录的函数，打印并拦截
+                if '"HDD 1 (exFAT)"' in txt or '"Memory Card 1"' in txt:
+                    for line in txt.splitlines():
+                        if any(x in line for x in ["mc0:/", "ata0:/", "cdfs:/", "mx4sio:/", "MISC/", "HDD 1"]):
+                            print("   LINE:", line.strip())
+
+                    # 如果是一个返回 int 且参数含 FILEINFO * 的子函数（比如填充 root 设备的 helper 函数）
+                    for m_sub in list(re.finditer(r'\b(static\s+)?int\s+(\w+)\s*\(([^)]*FILEINFO\s*\*\s*(\w+)[^)]*)\)\s*\{', txt)):
+                        fn_name = m_sub.group(2)
+                        if fn_name in ("getDir", "getDir_raw", "ule_force_root_order"):
+                            continue
+                        f_arg = m_sub.group(4)
+                        print(f"=> Found FILEINFO builder function {fn_name}(..., {f_arg}) in {cfile}")
+
+                if txt != orig:
+                    with open(cfile, "w", encoding="utf-8", newline="\n") as f:
+                        f.write(txt)
+
+        # 3. 额外保险：在所有调用 getDir( 的地方，如果 getDir 定义在别的文件未匹配到，直接宏劫持或拦截
+        if patched_count == 0:
+            for cfile in glob.glob("src/filer*.c"):
+                with open(cfile, "r", encoding="utf-8", errors="ignore") as f:
+                    txt = f.read()
+                if "getDir(" in txt and "ule_force_root_order" not in txt:
+                    txt = re.sub(r'(#include\s+"[^"]+"\s*\n)', r'\1' + filter_func + '\n', txt, count=1)
+                    txt = re.sub(r'(\b\w+\s*=\s*)(getDir\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\))', r'\1ule_force_root_order(\4, \2)', txt)
+                    with open(cfile, "w", encoding="utf-8", newline="\n") as f:
+                        f.write(txt)
+                    patched_count += 1
+                    print(f"=> Hooked getDir call sites in {cfile}!")
+
+        print(f"Total hooked locations: {patched_count}")
+        if patched_count == 0:
+            sys.exit("ERROR: Failed to hook root device list!")
 
         makefile_content = """#.SILENT:
 
@@ -148,7 +182,7 @@ jobs:
         IOP_RESET ?= 1
         XFROM ?= 0
         UDPTTY ?= 0
-        MX4SIO ?= 0
+        MX4SIO ?= 1
         SIO2MAN ?= 1
         PPC_UART ?= 0
         SIO_DEBUG ?= 0
@@ -410,8 +444,8 @@ jobs:
         if [ "${{ matrix.pad_profile }}" = "ds34" ]; then
           DS34_FLAG=1
         fi
-        # 在编译参数里彻底关死多余的驱动！
-        make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=0 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
+        # 明确开启 MX4SIO=1 EXFAT=1，关闭多余模块
+        make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=1 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
 
     - name: Rename output ELF for variant
       run: |
