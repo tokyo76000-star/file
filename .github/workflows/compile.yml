@@ -62,12 +62,13 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Write Clean Makefile, Customize Root Devices & Sanitize Source Files
+    - name: Write Clean Makefile & FORCE Sort Root Devices
       run: |
         python3 - << 'EOF'
-        import glob, re
+        import glob, os, re
 
         for p in ["gen_chs_font.py", "src/draw_text.c"]:
+            if not os.path.exists(p): continue
             with open(p, "rb") as f:
                 raw = f.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\xc2\xa0", b" ")
             lines = raw.decode("utf-8", errors="ignore").splitlines()
@@ -76,14 +77,15 @@ jobs:
             with open(p, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(lines) + "\n")
 
-        # 精确过滤并重排根目录设备列表：ata0:/ -> usb:/ -> mc0:/ -> mc1:/ -> hdd0:/ -> mx4sio:/ -> MISC/
+        # 终极暴力排序 C 语言外挂函数：直接接管内存数组！
         hook_code = r"""
-        static int ule_filter_and_sort_root_devices(FILEINFO *files, int count) {
-            const char *wanted_order[] = {"ata0:/", "usb:/", "mass:/", "mc0:/", "mc1:/", "hdd0:/", "mx4sio:/", "MISC/"};
+        static int ule_filter_and_sort_root_devices(void *vfiles, int count) {
+            FILEINFO *files = (FILEINFO *)vfiles;
+            const char *wanted_order[] = {"ata0:/", "usb:/", "mass:/", "mc0:/", "mc1:/", "hdd0:/", "MISC/"};
             FILEINFO temp[32];
             int new_cnt = 0;
             int w, idx;
-            for (w = 0; w < 8; w++) {
+            for (w = 0; w < 7; w++) {
                 for (idx = 0; idx < count; idx++) {
                     if (!strcmp(files[idx].name, wanted_order[w])) {
                         if (new_cnt < 32) temp[new_cnt++] = files[idx];
@@ -102,16 +104,36 @@ jobs:
         for cfile in glob.glob("src/filer*.c"):
             with open(cfile, "r", encoding="utf-8", errors="ignore") as f:
                 txt = f.read()
-            if "MISC/" in txt and "mc0:/" in txt and "ule_filter_and_sort_root_devices" not in txt:
-                txt = re.sub(r'(#include\s+"[^"]+"\s*\n)', r'\1' + hook_code + '\n', txt, count=1)
-                txt = re.sub(
-                    r'(strcpy\s*\(\s*files\[([a-zA-Z0-9_]+)\]\.name\s*,\s*"MISC/"\s*\)\s*;[^}]*?\2\s*\+\+\s*;)',
-                    r'\1\n\t\2 = ule_filter_and_sort_root_devices(files, \2);',
-                    txt
-                )
+            if '"MISC/"' in txt and '"mc0:/"' in txt:
+                print(f"-> 发现设备列表生成文件: {cfile}")
+                if "ule_filter_and_sort_root_devices" not in txt:
+                    txt = re.sub(r'(#include\s+"[^"]+"\s*\n)', r'\1' + hook_code + '\n', txt, count=1)
+                
+                # 寻找 MISC/ 的注入点
+                m = re.search(r'strcpy\s*\(\s*([^\[]+)\[([^\]]+)\]\.name\s*,\s*"MISC/"\s*\)\s*;', txt)
+                if m:
+                    arr_name = m.group(1).strip()
+                    idx_name = m.group(2).strip()
+                    post_txt = txt[m.end():]
+                    
+                    # 尝试在 return 之前拦截
+                    m_ret = re.search(r'\breturn\s+' + idx_name + r'\s*;', post_txt)
+                    if m_ret:
+                        insert_pos = m.end() + m_ret.start()
+                        injection = f"\n\t{idx_name} = ule_filter_and_sort_root_devices({arr_name}, {idx_name});\n"
+                        txt = txt[:insert_pos] + injection + txt[insert_pos:]
+                        print("=> 成功: 在 return 处强行接管了设备列表！")
+                    else:
+                        # 备用方案：在计数器增加后拦截
+                        m_inc = re.search(r'(\b' + idx_name + r'\s*\+\+\s*;)', post_txt)
+                        if m_inc:
+                            insert_pos = m.end() + m_inc.end()
+                            injection = f"\n\t{idx_name} = ule_filter_and_sort_root_devices({arr_name}, {idx_name});\n"
+                            txt = txt[:insert_pos] + injection + txt[insert_pos:]
+                            print("=> 成功: 在 ++ 处强行接管了设备列表！")
+                
                 with open(cfile, "w", encoding="utf-8", newline="\n") as f:
                     f.write(txt)
-                print(f"Patched root device list in {cfile}")
 
         makefile_content = """#.SILENT:
 
@@ -126,7 +148,7 @@ jobs:
         IOP_RESET ?= 1
         XFROM ?= 0
         UDPTTY ?= 0
-        MX4SIO ?= 1
+        MX4SIO ?= 0
         SIO2MAN ?= 1
         PPC_UART ?= 0
         SIO_DEBUG ?= 0
@@ -388,7 +410,8 @@ jobs:
         if [ "${{ matrix.pad_profile }}" = "ds34" ]; then
           DS34_FLAG=1
         fi
-        make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=1 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
+        # 在编译参数里彻底关死多余的驱动！
+        make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=0 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
 
     - name: Rename output ELF for variant
       run: |
