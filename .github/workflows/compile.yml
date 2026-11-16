@@ -62,10 +62,10 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Write Clean Makefile & Customize Root Devices (ONLY ata0, usb, mc0, mc1, MISC)
+    - name: Write Clean Makefile & Hook Root Devices (Strictly ata0, usb, mc0, mc1, MISC)
       run: |
         python3 - << 'EOF'
-        import glob, os, re
+        import glob, os, re, sys
 
         for p in ["gen_chs_font.py", "src/draw_text.c"]:
             if not os.path.exists(p): continue
@@ -77,375 +77,65 @@ jobs:
             with open(p, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(lines) + "\n")
 
-        # 终极全自动补丁：扫描所有 src/filer*.c，无论是静态表、函数生成还是右侧标签绘制，全部统一接管！
-        root_override_c = r"""
-        static int ule_custom_root_devices(FILEINFO *files, int orig_count) {
-            const char *wanted[] = {"ata0:/", "usb:/", "mc0:/", "mc1:/", "MISC/"};
-            int w, i, k = 0;
-            // 判断当前列表是否为根目录设备列表
-            int is_root = 0;
-            for (i = 0; i < orig_count; i++) {
-                if (!strcmp(files[i].name, "mc0:/") || !strcmp(files[i].name, "cdfs:/") || !strcmp(files[i].name, "MISC/")) {
-                    is_root = 1;
-                    break;
-                }
-            }
-            if (!is_root) return orig_count;
-
-            FILEINFO out[8];
-            memset(out, 0, sizeof(out));
-            for (w = 0; w < 5; w++) {
-                int found = -1;
-                for (i = 0; i < orig_count; i++) {
-                    if (!strcmp(files[i].name, wanted[w])) {
-                        found = i;
-                        break;
+        # 终极拦截代码：强行洗牌内存里的设备数组，只保留你指定的这几个！
+        hook_template = r"""
+            // --- AUTO SORT HOOK START ---
+            {
+                int _is_rt = 0;
+                for(int _i=0; _i<%(cnt)s; _i++) {
+                    if(!strcmp(%(arr)s[_i].name, "MISC/") || !strcmp(%(arr)s[_i].name, "mc0:/")) {
+                        _is_rt = 1; break;
                     }
                 }
-                if (found >= 0) {
-                    out[k++] = files[found];
-                } else {
-                    strcpy(out[k].name, wanted[w]);
-                    out[k].stats.AttrFile = MC_ATTR_SUBDIR;
-                    k++;
+                if(_is_rt) {
+                    const char *w[] = {"ata0:/", "usb:/", "mass:/", "mc0:/", "mc1:/", "MISC/"};
+                    FILEINFO tmp[32];
+                    int n = 0;
+                    for(int _w=0; _w<6; _w++) {
+                        for(int _i=0; _i<%(cnt)s; _i++) {
+                            if(!strcmp(%(arr)s[_i].name, w[_w])) {
+                                tmp[n++] = %(arr)s[_i];
+                                break;
+                            }
+                        }
+                    }
+                    for(int _i=0; _i<n; _i++) %(arr)s[_i] = tmp[_i];
+                    %(cnt)s = n;
                 }
             }
-            for (i = 0; i < k; i++) {
-                files[i] = out[i];
-            }
-            return k;
-        }
+            // --- AUTO SORT HOOK END ---
         """
 
-        for cfile in sorted(glob.glob("src/filer*.c")):
+        patched = False
+        for cfile in glob.glob("src/*.c"):
             with open(cfile, "r", encoding="utf-8", errors="ignore") as f:
-                txt = f.read()
-            orig_txt = txt
+                code = f.read()
+            
+            # 智能扫描源码：精准定位谁在构建 "mc0:/" 根目录
+            m = re.search(r'strn?cpy\s*\(\s*([a-zA-Z0-9_->]+)\s*\[[^\]]+\]\s*\.\s*name\s*,\s*"mc0:/"', code)
+            if m:
+                arr = m.group(1)
+                print(f"Found root array '{arr}' in {cfile}")
+                
+                # 顺藤摸瓜找到这个函数的 return 返回点
+                search_pos = m.end()
+                m_ret = re.search(r'\breturn\s+([^;]+);', code[search_pos:])
+                if m_ret:
+                    ret_expr = m_ret.group(1).strip()
+                    inject_pos = search_pos + m_ret.start()
+                    
+                    # 在 return 之前一秒，强行注入我们的洗牌代码！
+                    hook = hook_template % {'cnt': ret_expr, 'arr': arr}
+                    code = code[:inject_pos] + hook + "\n\treturn " + ret_expr + ";" + code[search_pos + m_ret.end():]
+                    
+                    with open(cfile, "w", encoding="utf-8") as f:
+                        f.write(code)
+                    print(f"-> Successfully hooked root device list in {cfile}!")
+                    patched = True
 
-            # 1. 打印所有出现 "mc0:/" 或 "HDD 1" 的上下文到 Actions 日志方便核对
-            if "mc0:/" in txt or "HDD 1" in txt:
-                print(f"=== Found root device code in {cfile} ===")
-                lines = txt.splitlines()
-                for idx, ln in enumerate(lines):
-                    if any(k in ln for k in ["mc0:/", "ata0:/", "hdd0:/", "cdfs:/", "Memory Card 1", "HDD 1"]):
-                        start = max(0, idx - 3)
-                        end = min(len(lines), idx + 5)
-                        print("\n".join(f"{j+1}: {lines[j]}" for j in range(start, end)))
-                        print("-" * 40)
-
-            # 2. 注入 ule_custom_root_devices 到每一个定义了 FILEINFO 操作的 filer*.c 文件中
-            if "ule_custom_root_devices" not in txt:
-                txt = re.sub(r'(#include\s+"[^"]+"\s*\n)', r'\1' + root_override_c + '\n', txt, count=1)
-
-            # 3. 拦截所有填充 FILEINFO 数组并最终 return count 的函数（包括 getRootDir / getDir / getRootDevices 等）
-            def hook_fileinfo_functions(code):
-                pattern = re.compile(r'((?:static\s+)?int\s+(\w+)\s*\(([^)]*FILEINFO\s*\*\s*(\w+)[^)]*)\)\s*\{)')
-                pos = 0
-                out = ""
-                while True:
-                    m = pattern.search(code, pos)
-                    if not m:
-                        out += code[pos:]
-                        break
-                    fn_name = m.group(2)
-                    arr_var = m.group(4)
-                    out += code[pos:m.end()]
-                    # 找到该函数的匹配的右花括号 '}'
-                    brace_depth = 1
-                    i = m.end()
-                    while i < len(code) and brace_depth > 0:
-                        if code[i] == '{':
-                            brace_depth += 1
-                        elif code[i] == '}':
-                            brace_depth -= 1
-                        i += 1
-                    fn_body = code[m.end():i-1]
-                    if fn_name != "ule_custom_root_devices":
-                        # 将函数体内所有的 return <expr>; 替换为 return ule_custom_root_devices(arr_var, <expr>);
-                        fn_body = re.sub(
-                            r'\breturn\s+([^;]+);',
-                            rf'return ule_custom_root_devices({arr_var}, \1);',
-                            fn_body
-                        )
-                        print(f"-> Hooked returns in function {fn_name}(..., FILEINFO *{arr_var}) in {cfile}")
-                    out += fn_body + "}"
-                    pos = i
-                return out
-
-            txt = hook_fileinfo_functions(txt)
-
-            # 4. 如果右侧设备说明文字（如 "Memory Card 1"、"HDD 1 (exFAT)"）是按设备名或者按索引显示的：
-            # 把按行号/固定顺序绘制右侧标签的代码改成按 files[...].name 动态匹配！
-            if '"Memory Card 1"' in txt and '"HDD 1 (exFAT)"' in txt:
-                # 检查是否用了 switch/if 比较，如果它是按列表名字匹配就天然对齐；如果是固定数组，我们看看结构
-                pass
-
-            if txt != orig_txt:
-                with open(cfile, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(txt)
-
-        makefile_content = """#.SILENT:
-
-        # ---{ BUILD CONFIGURATION }--- #
-        MMCE ?= 0
-        DS34 ?= 0
-        TMANIP ?= 1
-        ETH ?= 0
-        UDPFS ?= 0
-        EXFAT ?= 1
-        DVRP ?= 0
-        IOP_RESET ?= 1
-        XFROM ?= 0
-        UDPTTY ?= 0
-        MX4SIO ?= 0
-        SIO2MAN ?= 1
-        PPC_UART ?= 0
-        SIO_DEBUG ?= 0
-        DEBUG ?= 0
-        LCDVD ?= LATEST
-        # ----------------------------- #
-        .SILENT:
-
-        BIN_NAME = $(HAS_EXFAT)$(HAS_DS34)$(HAS_ETH)$(HAS_UDPFS)$(HAS_MX4SIO)$(HAS_MMCE)$(HAS_DVRP)$(HAS_XFROM)$(HAS_EESIO)$(HAS_UDPTTY)$(HAS_PPCTTY)$(HAS_IOP_RESET)
-        ifeq ($(DEBUG), 0)
-        EE_BIN = UNC-BOOT$(BIN_NAME).ELF
-        EE_BIN_PKD = BOOT$(BIN_NAME).ELF
-        else
-        EE_BIN = UNC-BOOT.ELF
-        EE_BIN_PKD = BOOT.ELF
-        endif
-
-        EE_OBJS = main.o main_actions.o main_boot.o main_modules.o main_menu.o main_title.o main_info_screens.o main_console_info.o main_gameid.o main_gameid_table.o neutrino_gameid.o main_history.o init.o main_startup.o main_fileops.o main_exploit_installer.o kelf_signer.o config.o config_screen.o config_startup.o config_network.o config_advanced.o gui.o gui_colors.o gui_neutrino.o virtual_keyboard.o elf.o draw.o draw_gs.o draw_text.o loader_elf.o filer.o filer_device.o filer_mount.o filer_fileops.o filer_actions.o filer_browser.o filer_copy.o gui_sort.o gui_texteditor.o gui_hdd0_format.o psu_functions.o save_formats.o save_crypto.o save_lzari.o save_manager.o save_vmc.o poweroff_irx.o iomanx_irx.o filexio_irx.o ps2dev9_irx.o dev9_poweroff_irx.o ps2hdd_irx.o ps2fs_irx.o usbd_irx.o mcman_irx.o mcserv_irx.o cdvd_irx.o xparam_irx.o vmcman_irx.o ps2kbd_irx.o hdd.o hdd_header_injector.o hdl_rpc.o hdl_info_irx.o editor.o editor_menu.o editor_input.o editor_rules.o editor_file.o timer.o icon.o lang.o popstarter.o popstarter_path.o popstarter_vcd.o popstarter_gameid.o popstarter_elf.o ember.o font_uLE.o font_chs.o makeicon.o chkesr.o allowdvdv_irx.o exploit_system_xlf_header.o exploit_xsystem_xlf_header.o exploit_dtl_system_xlf_header.o exploit_xlf_body.o exploit_osdsys_kernel.o exploit_osd110_kernel.o exploit_jpn_sys.o exploit_usa_sys.o exploit_eur_sys.o exploit_chn_sys.o exploit_list_icn.o secrsif_irx.o exploit_ioprp_img.o
-
-        EE_INCS := -I$(PS2DEV)/gsKit/include -I$(PS2SDK)/ports/include -Iinclude
-        EE_LDFLAGS := -L$(PS2DEV)/gsKit/lib -L$(PS2SDK)/ports/lib -Liop/oldlibs/libcdvd/lib -s -Wl,--no-warn-mismatch
-        EE_MATH_LIB := -lm
-        ifneq ($(wildcard $(PS2SDK)/ee/lib/libmf.a),)
-        EE_MATH_LIB := -lmf
-        endif
-
-        EE_LIBS = -Wl,--start-group -lgskit -ldmakit -lmc -lhdd -lkbd $(EE_MATH_LIB) -lcdvd -lc -lfileXio -lpatches -lpoweroff -ldebug -lz
-        EE_CFLAGS := -mgpopt -G10240 -G0 -DNEWLIB_PORT_AWARE -D_EE
-
-        ifneq ($(DEBUG), 0)
-        EE_CFLAGS += -DULE_DEBUG_BUILD
-        endif
-
-        BIN2S_TOOL ?=
-        ifneq ($(wildcard $(PS2SDK)/bin/bin2s),)
-        BIN2S_TOOL := $(PS2SDK)/bin/bin2s
-        else ifneq ($(wildcard $(PS2DEV)/bin/bin2s),)
-        BIN2S_TOOL := $(PS2DEV)/bin/bin2s
-        else ifneq ($(wildcard /usr/local/ps2dev/bin/bin2s),)
-        BIN2S_TOOL := /usr/local/ps2dev/bin/bin2s
-        else ifneq ($(wildcard $(CURDIR)/scripts/bin2s-fallback.sh),)
-        BIN2S_TOOL := sh $(CURDIR)/scripts/bin2s-fallback.sh
-        else
-        BIN2S_TOOL := $(shell command -v bin2s 2>/dev/null)
-        endif
-        ifeq ($(strip $(BIN2S_TOOL)),)
-        $(error bin2s not found)
-        endif
-        BIN2S = @$(BIN2S_TOOL)
-
-        ifeq ($(LCDVD),LEGACY)
-        EE_CFLAGS += -DLIBCDVD_LEGACY
-        CDVD_SOURCE = iop/cdvd.irx
-        EE_INCS += -Iiop/oldlibs/libcdvd/ee
-        EE_LIBS += -lcdvdfs
-        else
-        EE_CFLAGS += -DLIBCDVD_LATEST
-        CDVD_SOURCE = iop/__precompiled/cdfs.irx
-        ifneq ($(wildcard $(PS2SDK)/iop/irx/cdfs.irx),)
-        CDVD_SOURCE = $(PS2SDK)/iop/irx/cdfs.irx
-        endif
-        endif
-
-        SECR_LIB_SOURCE := thirdparty/ps2sdk-master/ee/rpc/secr/src/libsecr.c
-        IOPREBOOT_INC_DIR := $(PS2SDK)/ee/iopreboot/include
-        ifneq ($(wildcard thirdparty/ps2sdk-master/ee/iopreboot/include/iopcontrol_special.h),)
-        IOPREBOOT_INC_DIR := thirdparty/ps2sdk-master/ee/iopreboot/include
-        endif
-        EE_INCS += -Ithirdparty/ps2sdk-master/ee/rpc/secr/include -Ithirdparty/ps2sdk-master/common/include -I$(IOPREBOOT_INC_DIR)
-        EE_LIBS += -liopreboot
-        ifneq ($(wildcard $(PS2SDK)/ee/lib/libsecr.a),)
-        EE_LIBS += -lsecr
-        else ifneq ($(wildcard $(SECR_LIB_SOURCE)),)
-        EE_OBJS += libsecr.o
-        else
-        $(error Missing libsecr)
-        endif
-
-        ifeq ($(XFROM),1)
-        HAS_XFROM = -XFROM
-        EE_CFLAGS += -DXFROM
-        EE_OBJS += xfromman_irx.o xfromserv_irx.o extflash_irx.o
-        endif
-
-        ifeq ($(DS34),1)
-        EE_OBJS += ds34usb.o libds34usb.a ds34bt.o libds34bt.a pad_ds34.o
-        HAS_DS34 = -DS34
-        EE_CFLAGS += -DDS34
-        else
-        EE_OBJS += pad.o
-        endif
-
-        ifeq ($(DVRP),1)
-        EE_OBJS += ps2atad_irx.o dvrdrv_irx.o dvrfile_irx.o
-        EE_CFLAGS += -DDVRP
-        HAS_DVRP = -DVRP
-        endif
-
-        ifeq ($(MMCE),1)
-        EE_OBJS += mmceman_irx.o
-        EE_CFLAGS += -DMMCE
-        HAS_MMCE = -MMCE
-        SIO2MAN = 1
-        endif
-
-        ifeq ($(MX4SIO),1)
-        ifneq ($(EXFAT),1)
-        $(error MX4SIO Requested on build without BDM)
-        else
-        EE_OBJS += mx4sio_bd.o
-        EE_CFLAGS += -DMX4SIO
-        HAS_MX4SIO = -MX4SIO
-        SIO2MAN = 1
-        endif
-        endif
-
-        ifeq ($(SIO2MAN),1)
-        EE_OBJS += sio2man.o padman.o
-        EE_CFLAGS += -DHOMEBREW_SIO2MAN
-        EE_LIBS += -lpadx
-        else
-        EE_LIBS += -lpad
-        endif
-
-        ifeq ($(SIO_DEBUG),1)
-        EE_CFLAGS += -DSIO_DEBUG
-        HAS_EESIO = -SIO_DEBUG
-        endif
-
-        ifeq ($(PPC_UART),1)
-        EE_CFLAGS += -DPOWERPC_UART
-        HAS_PPCTTY = -PPCTTY
-        EE_OBJS += ppctty.o
-        endif
-
-        ifeq ($(IOP_RESET),0)
-        EE_CFLAGS += -DNO_IOP_RESET
-        HAS_IOP_RESET = -NO_IOP_RESET
-        endif
-
-        ifeq ($(ETH),1)
-        EE_OBJS += ps2smap_irx.o ps2ftpd_irx.o ps2host_irx.o ps2netfs_irx.o ps2ip_irx.o
-        EE_CFLAGS += -DETH
-        ifeq ($(UDPFS),1)
-        HAS_ETH = -ETH
-        endif
-        endif
-
-        ifeq ($(UDPFS),1)
-        EE_OBJS += udpfs_smap_irx.o udpfs_ministack_irx.o udpfs_ioman_irx.o
-        EE_CFLAGS += -DUDPFS
-        HAS_UDPFS = -UDPFS
-        endif
-
-        ifneq ($(ETH),1)
-        ifneq ($(UDPFS),1)
-        HAS_ETH = -NO_NETWORK
-        endif
-        endif
-
-        ifeq ($(UDPTTY),1)
-        EE_OBJS += udptty.o
-        HAS_UDPTTY = -UDPTTY
-        EE_CFLAGS += -DUDPTTY -DCOMMON_PRINTF
-        endif
-
-        ifeq ($(TMANIP),1)
-        EE_CFLAGS += -DTMANIP
-        endif
-
-        ifeq ($(TMANIP),2)
-        EE_CFLAGS += -DTMANIP
-        EE_CFLAGS += -DTMANIP_MORON
-        endif
-
-        ifeq ($(EXFAT),1)
-        EE_OBJS += bdm_irx.o bdmfs_fatfs_irx.o usbmass_bd_irx.o ata_bd_irx.o
-        EE_CFLAGS += -DEXFAT
-        HAS_EXFAT = -EXFAT
-        else
-        EE_OBJS += usbhdfsd_irx.o
-        endif
-
-        ifneq ($(DEFAULT_COLORS),1)
-        EE_CFLAGS += -DCUSTOM_COLORS
-        endif
-
-        ifeq ($(IOPTRAP),1)
-        EE_OBJS += ioptrap_irx.o
-        EE_CFLAGS += -DIOPTRAP
-        endif
-
-        EE_LIBS += -Wl,--end-group
-
-        EE_OBJS_DIR = obj/
-        EE_ASM_DIR = asm/
-        EE_SRC_DIR = src/
-        EE_OBJS := $(EE_OBJS:%=$(EE_OBJS_DIR)%)
-
-        .PHONY: all clean rebuild
-
-        all: githash.h $(EE_BIN_PKD)
-
-        $(EE_BIN_PKD): $(EE_BIN)
-        \tps2-packer $< $@
-
-        $(EE_OBJS_DIR):
-        \tmkdir -p $@
-
-        $(EE_ASM_DIR):
-        \tmkdir -p $@
-
-        githash.h:
-        \tprintf '#ifndef ULE_VERDATE\\n#define ULE_VERDATE "build"\\n#endif\\n#ifndef GIT_HASH\\n#define GIT_HASH "chs"\\n#endif\\n' > $@
-
-        clean:
-        \t$(MAKE) -C loader clean
-        \t$(MAKE) -C iop/hdl_info clean
-        \t$(MAKE) -C iop/ps2host clean
-        \t$(MAKE) -C iop/AllowDVDV clean
-        \t$(MAKE) -C iop/oldlibs/libcdvd clean
-        \t$(MAKE) -C iop/oldlibs/ps2ftpd clean
-        \t$(MAKE) -C iop/ps2hdd_osd clean
-        \t$(MAKE) -C iop/dev9_poweroff clean
-        \t@rm -f githash.h $(EE_BIN) $(EE_BIN_PKD)
-        \t@rm -rf $(EE_OBJS_DIR) $(EE_ASM_DIR) iop/__generated iop/*.irx
-
-        rebuild: clean all
-
-        $(EE_OBJS_DIR)%.o: $(EE_SRC_DIR)%.c | $(EE_OBJS_DIR)
-        \t$(EE_CC) $(EE_CFLAGS) $(EE_INCS) -c $< -o $@
-
-        $(EE_OBJS_DIR)libsecr.o: $(SECR_LIB_SOURCE) | $(EE_OBJS_DIR)
-        \t$(EE_CC) $(EE_CFLAGS) $(EE_INCS) -c $< -o $@
-
-        $(EE_OBJS_DIR)%.o: $(EE_ASM_DIR)%.s | $(EE_OBJS_DIR)
-        \t$(EE_AS) $(EE_ASFLAGS) $< -o $@
-
-        $(EE_OBJS_DIR)%.o: $(EE_SRC_DIR)%.cpp | $(EE_OBJS_DIR)
-        \t$(EE_CXX) $(EE_CXXFLAGS) $(EE_INCS) -c $< -o $@
-
-        include embed.make
-        include $(PS2SDK)/samples/Makefile.pref
-        include $(PS2SDK)/samples/Makefile.eeglobal
-        """
-        lines = [line.lstrip(" ") for line in makefile_content.splitlines()]
-        with open("Makefile", "w", encoding="utf-8", newline="\n") as f:
-            f.write("\n".join(lines) + "\n")
+        if not patched:
+            print("WARNING: Python injection failed to find mc0:/ array!")
+            sys.exit(1)
         EOF
         chmod +x scripts/ci/resolve_make_args.sh
 
@@ -459,6 +149,9 @@ jobs:
         if [ "${{ matrix.pad_profile }}" = "ds34" ]; then
           DS34_FLAG=1
         fi
+        
+        # 从编译源头彻底关死多余模块 (MX4SIO=0, UDPFS=0, ETH=0)
+        make clean || true
         make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=0 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
 
     - name: Rename output ELF for variant
