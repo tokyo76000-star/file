@@ -66,7 +66,7 @@ jobs:
     - name: Sanitize Files, Patch UI Fixes, Root Order & Clean Makefile
       run: |
         python3 - << 'EOF'
-        import glob, os, subprocess
+        import glob, os, re, subprocess
 
         for p in ["gen_chs_font.py", "src/draw_text.c", "src/filer_browser.c", "Lang/ENG.LNG"]:
             if not os.path.exists(p):
@@ -95,17 +95,26 @@ jobs:
             with open("src/lang.c", "w", encoding="utf-8", newline="\n") as f:
                 f.write(lc)
 
-        # 3. 保留原版 "O:增加 X:减少"，修复 "换行" -> "返回"，补全 "Advanced Settings..." -> "高级设置..."
+        # 3. 保留原版 "O:增加 X:减少"，修复 "换行" -> "返回"
         for cfg_file in glob.glob("src/config*.c"):
             with open(cfg_file, "r", encoding="utf-8") as f:
                 ct = f.read()
             ct = ct.replace("LNG(RETURN)", "LNG(Return)")
-            ct = ct.replace('"Advanced Settings..."', '"高级设置..."')
-            ct = ct.replace('"Advanced Settings"', '"高级设置"')
             with open(cfg_file, "w", encoding="utf-8", newline="\n") as f:
                 f.write(ct)
 
-        # 4. 汉化主界面右侧设备描述 + 根目录只保留 ata0 -> usb -> mc0 -> mc1 -> MISC
+        # 4. 全源码不区分大小写地毯式替换 "Advanced Settings..." -> "高级设置..."
+        for code_file in glob.glob("src/*.c") + glob.glob("include/*.h"):
+            with open(code_file, "r", encoding="utf-8", errors="ignore") as f:
+                ctxt = f.read()
+            new_ctxt, n1 = re.subn(r'"Advanced\s+Settings\.\.\."', '"高级设置..."', ctxt, flags=re.IGNORECASE)
+            new_ctxt, n2 = re.subn(r'"Advanced\s+Settings"', '"高级设置"', new_ctxt, flags=re.IGNORECASE)
+            if n1 or n2:
+                print(f"Patched Advanced Settings ({n1}+{n2}) in {code_file}")
+                with open(code_file, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(new_ctxt)
+
+        # 5. 汉化主界面右侧设备描述 + 根目录只保留 ata0 -> usb -> mc0 -> mc1 -> MISC
         with open("src/filer_browser.c", "r", encoding="utf-8") as f:
             fb = f.read()
 
