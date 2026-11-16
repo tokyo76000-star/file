@@ -62,9 +62,11 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/iop/__precompiled/
         cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/irx/bdmfs_fatfs.irx $GITHUB_WORKSPACE/iop/__precompiled/bdmfs_fatfs.irx || true
 
-    - name: Write Clean Makefile & Sanitize Source Files
+    - name: Write Clean Makefile, Customize Root Devices & Sanitize Source Files
       run: |
         python3 - << 'EOF'
+        import glob, re
+
         for p in ["gen_chs_font.py", "src/draw_text.c"]:
             with open(p, "rb") as f:
                 raw = f.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\xc2\xa0", b" ")
@@ -74,18 +76,55 @@ jobs:
             with open(p, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(lines) + "\n")
 
+        # 精确过滤并重排根目录设备列表：ata0:/ -> usb:/ -> mc0:/ -> mc1:/ -> hdd0:/ -> mx4sio:/ -> MISC/
+        hook_code = r"""
+        static int ule_filter_and_sort_root_devices(FILEINFO *files, int count) {
+            const char *wanted_order[] = {"ata0:/", "usb:/", "mass:/", "mc0:/", "mc1:/", "hdd0:/", "mx4sio:/", "MISC/"};
+            FILEINFO temp[32];
+            int new_cnt = 0;
+            int w, idx;
+            for (w = 0; w < 8; w++) {
+                for (idx = 0; idx < count; idx++) {
+                    if (!strcmp(files[idx].name, wanted_order[w])) {
+                        if (new_cnt < 32) temp[new_cnt++] = files[idx];
+                        break;
+                    }
+                }
+            }
+            if (new_cnt > 0) {
+                for (idx = 0; idx < new_cnt; idx++) files[idx] = temp[idx];
+                return new_cnt;
+            }
+            return count;
+        }
+        """
+
+        for cfile in glob.glob("src/filer*.c"):
+            with open(cfile, "r", encoding="utf-8", errors="ignore") as f:
+                txt = f.read()
+            if "MISC/" in txt and "mc0:/" in txt and "ule_filter_and_sort_root_devices" not in txt:
+                txt = re.sub(r'(#include\s+"[^"]+"\s*\n)', r'\1' + hook_code + '\n', txt, count=1)
+                txt = re.sub(
+                    r'(strcpy\s*\(\s*files\[([a-zA-Z0-9_]+)\]\.name\s*,\s*"MISC/"\s*\)\s*;[^}]*?\2\s*\+\+\s*;)',
+                    r'\1\n\t\2 = ule_filter_and_sort_root_devices(files, \2);',
+                    txt
+                )
+                with open(cfile, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(txt)
+                print(f"Patched root device list in {cfile}")
+
         makefile_content = """#.SILENT:
 
         # ---{ BUILD CONFIGURATION }--- #
-        MMCE ?= 1
+        MMCE ?= 0
         DS34 ?= 0
         TMANIP ?= 1
         ETH ?= 0
-        UDPFS ?= 1
+        UDPFS ?= 0
         EXFAT ?= 1
-        DVRP ?= 1
+        DVRP ?= 0
         IOP_RESET ?= 1
-        XFROM ?= 1
+        XFROM ?= 0
         UDPTTY ?= 0
         MX4SIO ?= 1
         SIO2MAN ?= 1
@@ -345,13 +384,11 @@ jobs:
 
     - name: Compile wLaunchELF
       run: |
-        FLAGS="$(scripts/ci/resolve_make_args.sh \
-          "${{ matrix.psx_profile }}" \
-          "${{ matrix.pad_profile }}" \
-          "${{ matrix.storage_profile }}" \
-          0 0)"
-        echo "Resolved make flags: $FLAGS"
-        make rebuild ${{ github.event.inputs.make_args }} $FLAGS
+        DS34_FLAG=0
+        if [ "${{ matrix.pad_profile }}" = "ds34" ]; then
+          DS34_FLAG=1
+        fi
+        make rebuild ETH=0 UDPFS=0 EXFAT=1 MMCE=0 MX4SIO=1 DVRP=0 XFROM=0 DS34=$DS34_FLAG DEBUG=0 PPC_UART=0 ${{ github.event.inputs.make_args }}
 
     - name: Rename output ELF for variant
       run: |
