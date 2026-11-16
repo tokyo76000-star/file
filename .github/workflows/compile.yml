@@ -21,17 +21,22 @@ jobs:
       - name: Rebuild bdmfs_fatfs.irx with UTF-8 (FF_LFN_UNICODE = 2)
         run: |
           rm -rf /tmp/ps2sdk
-          git clone --depth 1 --recurse-submodules https://github.com/ps2dev/ps2sdk.git /tmp/ps2sdk
-          for f in $(find /tmp/ps2sdk -name "ffconf.h"); do
-            sed -i 's/#define[[:space:]]*FF_LFN_UNICODE.*/#define FF_LFN_UNICODE 2/' "$f"
-            grep "FF_LFN_UNICODE" "$f"
-          done
-          mkdir -p /tmp/ps2sdk/common/external_deps/fatfs/source/include
-          cp -fv /tmp/ps2sdk/common/external_deps/fatfs/source/*.h /tmp/ps2sdk/common/external_deps/fatfs/source/include/ || true
+          # 1. 拉取 PS2SDK 源码
+          git clone --depth 1 https://github.com/ps2dev/ps2sdk.git /tmp/ps2sdk
+          
+          # 2. 强制拉取包含 source/include 目录的 iop-r0.15 分支
+          mkdir -p /tmp/ps2sdk/common/external_deps
+          git clone --depth 1 -b iop-r0.15 https://github.com/fjtrujy/FatFs.git /tmp/ps2sdk/common/external_deps/fatfs
+          
+          # 3. 开启 UTF-8 支持
+          sed -i 's/#define[[:space:]]*FF_LFN_UNICODE.*/#define FF_LFN_UNICODE 2/' /tmp/ps2sdk/common/external_deps/fatfs/source/include/ffconf.h
+          
+          # 4. 编译驱动
           make -C /tmp/ps2sdk/iop/fs/bdmfs_fatfs PS2SDKSRC=/tmp/ps2sdk
-          IRX_FILE=$(find /tmp/ps2sdk/iop/fs/bdmfs_fatfs -name "bdmfs_fatfs.irx" | head -n 1)
-          cp -fv "$IRX_FILE" "$PS2SDK/iop/irx/bdmfs_fatfs.irx"
-          for f in $(find . -name "bdmfs_fatfs.irx"); do cp -fv "$IRX_FILE" "$f"; done
+          
+          # 5. 覆盖旧驱动
+          cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/obj/bdmfs_fatfs.irx $PS2SDK/iop/irx/bdmfs_fatfs.irx
+          find . -name "bdmfs_fatfs.irx" -exec cp -fv /tmp/ps2sdk/iop/fs/bdmfs_fatfs/obj/bdmfs_fatfs.irx {} \; || true
 
       - name: Generate Full CJK Font (src/font_chs.c)
         run: |
